@@ -152,7 +152,7 @@ fn open_settings(app: &tauri::AppHandle) {
         "settings",
         WebviewUrl::App("settings.html".into()),
     )
-    .title("Claude Incognito · Settings")
+    .title("One-off Claude Incognito · Settings")
     .inner_size(520.0, 520.0)
     .min_inner_size(440.0, 420.0)
     .decorations(false)
@@ -439,11 +439,11 @@ pub fn run() {
             let quit_app_item = MenuItem::with_id(
                 app,
                 "menu-quit-app",
-                "Quit Claude Incognito",
+                "Quit One-off Claude Incognito",
                 true,
                 Some("Cmd+Shift+Q"),
             )?;
-            let app_submenu = SubmenuBuilder::new(app, "Claude Incognito")
+            let app_submenu = SubmenuBuilder::new(app, "One-off Claude Incognito")
                 .item(&close_win_q_item)
                 .separator()
                 .item(&quit_app_item)
@@ -498,7 +498,7 @@ pub fn run() {
                 MenuItem::with_id(app, "settings", "Settings…", true, Some("Cmd+,"))?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit_item =
-                MenuItem::with_id(app, "quit", "Quit Claude Incognito", true, None::<&str>)?;
+                MenuItem::with_id(app, "quit", "Quit One-off Claude Incognito", true, None::<&str>)?;
             let tray_menu = Menu::with_items(
                 app,
                 &[

@@ -1,12 +1,12 @@
 [package]
-name = "claude-incognito"
+name = "one-off-claude-incognito"
 version = "0.1.0"
 description = "Incognito Claude chat overlay summoned by a global hotkey"
 authors = ["Yohei Yamasaki"]
 edition = "2021"
 
 [lib]
-name = "claude_incognito_lib"
+name = "one_off_claude_incognito_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

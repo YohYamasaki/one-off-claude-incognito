@@ -61,7 +61,7 @@ impl ChatSession {
         effort: &str,
     ) -> std::io::Result<Self> {
         let tempdir = tempfile::Builder::new()
-            .prefix("claude-incognito-")
+            .prefix("one-off-claude-incognito-")
             .tempdir()?;
 
         let mut args: Vec<String> = vec![

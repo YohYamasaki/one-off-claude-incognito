@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    claude_incognito_lib::run()
+    one_off_claude_incognito_lib::run()
 }
