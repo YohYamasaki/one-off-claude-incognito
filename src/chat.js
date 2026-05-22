@@ -1,3 +1,12 @@
+import { MODELS, DEFAULT_MODEL, canonicalizeModel, modelShort } from "./lib/models.js";
+import { EFFORT_LABELS, canonicalizeEffort } from "./lib/effort.js";
+import { parseClaudeEvent } from "./lib/events.js";
+import { createImeTracker } from "./lib/ime.js";
+
+// MODELS is imported for completeness — chat.js mainly uses the alias map
+// and short-label helpers; the popover options live in HTML.
+void MODELS;
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const currentWindow = window.__TAURI__.window.getCurrentWindow();
@@ -9,41 +18,7 @@ const WINDOW_LABEL = currentWindow.label;
 let isStreaming = false;
 let currentBubble = null;
 
-const MODELS = [
-  { id: "claude-haiku-4-5", short: "Haiku 4.5" },
-  { id: "claude-sonnet-4-5", short: "Sonnet 4.5" },
-  { id: "claude-sonnet-4-6", short: "Sonnet 4.6" },
-  { id: "claude-opus-4-6", short: "Opus 4.6" },
-  { id: "claude-opus-4-7", short: "Opus 4.7" },
-];
-
-const MODEL_ALIAS = {
-  haiku: "claude-haiku-4-5",
-  sonnet: "claude-sonnet-4-6",
-  opus: "claude-opus-4-7",
-};
-
-function modelShort(id) {
-  const found = MODELS.find((m) => m.id === id);
-  if (found) return found.short;
-  const mapped = MODEL_ALIAS[id];
-  if (mapped) return MODELS.find((m) => m.id === mapped)?.short || id;
-  return id;
-}
-
-const EFFORT_LABELS = {
-  low: "low",
-  medium: "medium",
-  high: "high",
-  max: "max",
-};
-
-function canonicalizeEffort(e) {
-  if (!e || e === "default") return "low";
-  return e;
-}
-
-let sessionModel = "claude-sonnet-4-6";
+let sessionModel = DEFAULT_MODEL;
 let sessionEffort = "low";
 
 // Window auto-resize bookkeeping
@@ -53,9 +28,7 @@ let lastSyncedHeight = MIN_HEIGHT;
 let syncScheduled = false;
 let resizeTweenActive = false;
 
-// IME composition tracking (Japanese / CJK input fix)
-let imeComposing = false;
-let lastCompositionEndTime = 0;
+const ime = createImeTracker();
 
 // ───────── DOM ─────────
 
@@ -257,7 +230,6 @@ function finalizeBubble(b) {
     b.text.innerHTML = '<span class="empty-note">(no response)</span>';
   }
   scrollToBottom();
-  // Sync once at the end so the whole completed response fits.
   debouncedSyncHeight();
 }
 
@@ -309,9 +281,6 @@ async function tweenWindowHeight(targetH) {
     const startLogicalW = outer.width / scale;
     const startLogicalX = pos.x / scale;
     const startLogicalY = pos.y / scale;
-    // Always anchor to the current bottom edge. If the user has manually
-    // moved the window, that's where we should grow from — never snap them
-    // back to an older remembered anchor.
     const bottom = startLogicalY + startLogicalH;
 
     const startTime = performance.now();
@@ -380,29 +349,15 @@ composerEl.addEventListener("submit", (e) => {
 });
 
 inputEl.addEventListener("input", () => {
-  // Only grow the textarea itself; don't trigger a window resize on every
-  // keystroke.
   autoResize();
 });
 
 // IME composition tracking
-inputEl.addEventListener("compositionstart", () => {
-  imeComposing = true;
-});
-inputEl.addEventListener("compositionend", () => {
-  imeComposing = false;
-  lastCompositionEndTime = performance.now();
-});
+inputEl.addEventListener("compositionstart", () => ime.onCompositionStart());
+inputEl.addEventListener("compositionend", () => ime.onCompositionEnd());
 
 inputEl.addEventListener("keydown", (e) => {
-  // Triple-defense against IME confirm-Enter sending the message
-  const imeBusy =
-    imeComposing ||
-    e.isComposing ||
-    e.keyCode === 229 ||
-    performance.now() - lastCompositionEndTime < 50;
-
-  if (e.key === "Enter" && !e.shiftKey && !imeBusy) {
+  if (e.key === "Enter" && !e.shiftKey && !ime.isBusy(e)) {
     e.preventDefault();
     send();
   } else if (e.key === "Escape" && !popoverEl.classList.contains("open")) {
@@ -427,8 +382,6 @@ function renderChip() {
 }
 
 async function openPopover() {
-  // Grow the window all the way to MAX_HEIGHT so the popover has plenty of
-  // room. The user can collapse back later via auto-resize on next message.
   if (window.innerHeight < MAX_HEIGHT - 20) {
     await tweenWindowHeight(MAX_HEIGHT);
   }
@@ -584,68 +537,51 @@ listen(`claude-event-${WINDOW_LABEL}`, (e) => {
     console.error("parse error", err, e.payload);
     return;
   }
+
+  const event = parseClaudeEvent(payload);
+  if (!event) return;
+
   const b = currentBubble;
-  if (!b && payload.type !== "system" && payload.type !== "result") return;
 
-  if (payload.type === "stream_event") {
-    const ev = payload.event;
-    if (!ev) return;
+  switch (event.kind) {
+    case "thinking-start":
+      if (b) showThinkingSection(b);
+      return;
 
-    if (ev.type === "content_block_start") {
-      const block = ev.content_block || {};
-      if (block.type === "thinking" && b) {
-        showThinkingSection(b);
+    case "thinking-delta":
+      if (!b) return;
+      if (b.thinking.hidden) showThinkingSection(b);
+      b.thinkingStr += event.text;
+      scheduleRender();
+      return;
+
+    case "text-delta":
+      if (!b) return;
+      if (!b.thinkingDoneAt && !b.thinking.hidden) finalizeThinking(b);
+      b.textStr += event.text;
+      scheduleRender();
+      return;
+
+    case "result":
+      if (b) {
+        if (!b.textStr && event.result) b.textStr = event.result;
+        finalizeBubble(b);
+      }
+      if (event.isError) {
+        const errDiv = document.createElement("div");
+        errDiv.className = "bubble error";
+        errDiv.textContent = "(claude reported an error)";
+        messagesEl.appendChild(errDiv);
+      }
+      setStreaming(false);
+      return;
+
+    case "assistant-final":
+      if (b && !b.textStr) {
+        b.textStr = event.text;
+        scheduleRender();
       }
       return;
-    }
-
-    if (ev.type === "content_block_delta") {
-      const d = ev.delta || {};
-      if (d.type === "thinking_delta" && b) {
-        if (b.thinking.hidden) showThinkingSection(b);
-        b.thinkingStr += d.thinking || "";
-        scheduleRender();
-      } else if (d.type === "text_delta" && b) {
-        if (!b.thinkingDoneAt && !b.thinking.hidden) {
-          finalizeThinking(b);
-        }
-        b.textStr += d.text || "";
-        scheduleRender();
-      }
-      return;
-    }
-    return;
-  }
-
-  if (payload.type === "result") {
-    if (b) {
-      if (!b.textStr && payload.result) {
-        b.textStr = payload.result;
-      }
-      finalizeBubble(b);
-    }
-    if (payload.is_error) {
-      const errDiv = document.createElement("div");
-      errDiv.className = "bubble error";
-      errDiv.textContent = `(claude reported an error)`;
-      messagesEl.appendChild(errDiv);
-    }
-    setStreaming(false);
-    return;
-  }
-
-  if (payload.type === "assistant" && b && !b.textStr) {
-    const content = payload.message && payload.message.content;
-    if (Array.isArray(content)) {
-      const text = content
-        .filter((c) => c.type === "text")
-        .map((c) => c.text)
-        .join("");
-      if (text) {
-        b.textStr = text;
-        scheduleRender();
-      }
-    }
   }
 });
 
@@ -668,19 +604,15 @@ listen(`session-error-${WINDOW_LABEL}`, (e) => {
 
 // ───────── boot ─────────
 
-function canonicalizeModel(id) {
-  return MODEL_ALIAS[id] || id;
-}
-
 async function loadSessionInfo() {
   try {
     const info = await invoke("get_window_session_info");
     if (info) {
-      sessionModel = canonicalizeModel(info.model || "claude-sonnet-4-6");
+      sessionModel = canonicalizeModel(info.model);
       sessionEffort = canonicalizeEffort(info.effort);
     } else {
       const s = await invoke("get_settings");
-      sessionModel = canonicalizeModel(s.model || "claude-sonnet-4-6");
+      sessionModel = canonicalizeModel(s.model);
       sessionEffort = canonicalizeEffort(s.effort);
     }
   } catch (_) {}

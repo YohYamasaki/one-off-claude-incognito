@@ -1,17 +1,11 @@
+import { formatHotkey } from "./lib/keyboard.js";
+import { canonicalizeEffort } from "./lib/effort.js";
+
 const { invoke } = window.__TAURI__.core;
 const currentWindow = window.__TAURI__.window.getCurrentWindow();
 
-const MODIFIER_GLYPHS = {
-  super: "⌘",
-  shift: "⇧",
-  alt: "⌥",
-  control: "⌃",
-};
-
-const MODIFIER_ORDER = ["control", "alt", "shift", "super"];
-
 const state = {
-  current: null, // {hotkey:{modifiers,key}, model, effort}
+  current: null, // { hotkey: {modifiers, key}, model, effort }
   draft: null,
   recording: false,
 };
@@ -27,33 +21,8 @@ const saveBtn = $("save-btn");
 const saveStatus = $("save-status");
 const closeBtn = $("close-btn");
 
-function keyToGlyph(code) {
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  if (code.startsWith("Arrow")) {
-    return { Up: "↑", Down: "↓", Left: "←", Right: "→" }[code.slice(5)] || code;
-  }
-  if (code === "Space") return "␣";
-  if (code === "Enter") return "↩";
-  if (code === "Tab") return "⇥";
-  if (code === "Backquote") return "`";
-  if (code === "Minus") return "-";
-  if (code === "Equal") return "=";
-  if (code === "BracketLeft") return "[";
-  if (code === "BracketRight") return "]";
-  if (code === "Semicolon") return ";";
-  if (code === "Quote") return "'";
-  if (code === "Comma") return ",";
-  if (code === "Period") return ".";
-  if (code === "Slash") return "/";
-  if (code === "Backslash") return "\\";
-  return code;
-}
-
 function renderHotkey(cfg) {
-  const ordered = MODIFIER_ORDER.filter((m) => cfg.modifiers.includes(m));
-  const glyphs = ordered.map((m) => MODIFIER_GLYPHS[m] || m).join("");
-  hotkeyText.textContent = glyphs + keyToGlyph(cfg.key);
+  hotkeyText.textContent = formatHotkey(cfg);
 }
 
 function renderSegmented(group, value) {
@@ -75,11 +44,6 @@ function refreshUI() {
   renderHotkey(state.draft.hotkey);
   renderSegmented(modelSeg, state.draft.model);
   renderSegmented(effortSeg, state.draft.effort);
-}
-
-function canonicalizeEffort(e) {
-  if (!e || e === "default") return "low";
-  return e;
 }
 
 async function load() {
