@@ -1,32 +1,95 @@
 #!/bin/zsh
 # End-to-end verification for One-off Claude Incognito.
 #
-# The "static" pass works in any shell. It confirms the build pipeline
-# is wired up: Tauri dev process alive, Vite serving TS as JS, public
-# assets reachable, lib tests still green.
+# Static checks run anywhere. Interactive checks (hotkey, window
+# lifecycle) need Accessibility permission for the Terminal that runs
+# this script (System Settings → Privacy & Security → Accessibility).
 #
-# The "interactive" pass uses osascript to drive the global hotkey, type
-# into the chat, and close the window. It needs Accessibility permission
-# for the Terminal you're running it from (System Settings → Privacy &
-# Security → Accessibility → ✓ Terminal).
+# The interactive checks read the current hotkey from settings.json so
+# they work regardless of whether you've customised it.
 #
-# Run from an interactive Terminal session for the full check:
-#   ./scripts/verify-e2e.sh
-#
-# To skip the interactive checks (e.g. from CI / nested shells):
-#   STATIC_ONLY=1 ./scripts/verify-e2e.sh
+# Usage:
+#   ./scripts/verify-e2e.sh               # full check
+#   STATIC_ONLY=1 ./scripts/verify-e2e.sh # skip osascript checks
 
 set -u
 
 PROC="one-off-claude-incognito"
+SETTINGS="$HOME/Library/Application Support/dev.yamasaki.one-off-claude-incognito/settings.json"
 PASS=0
 FAIL=0
+SKIP=0
 
 step() { printf "\n=== %s ===\n" "$1"; }
 ok()   { echo "  ✓ $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  ✗ $1" >&2; FAIL=$((FAIL + 1)); }
+skip() { echo "  ⊘ skipped: $1"; SKIP=$((SKIP + 1)); }
 
-# ───────── static checks ──────────────────────────────────────────────
+# ───────── derive the configured hotkey ─────────────────────────────
+
+# Builds the osascript "keystroke ... using {...}" suffix from
+# settings.json. Falls back to the default ⌘⇧C if the file is missing
+# or the key isn't a plain letter / digit / space.
+build_hotkey_command() {
+  python3 - "$SETTINGS" <<'PY' 2>/dev/null
+import json, sys
+DEFAULT = 'keystroke "c" using {command down, shift down}'
+try:
+    path = sys.argv[1]
+    with open(path) as f:
+        s = json.load(f)
+    h = s.get("hotkey") or {}
+    mods = h.get("modifiers") or []
+    key = h.get("key") or "KeyC"
+    mod_map = {
+        "super":   "command down",
+        "shift":   "shift down",
+        "alt":     "option down",
+        "control": "control down",
+    }
+    parts = [mod_map[m] for m in mods if m in mod_map]
+    mod_str = ", ".join(parts)
+    if key.startswith("Key") and len(key) == 4:
+        char = key[3].lower()
+        print(f'keystroke "{char}" using {{{mod_str}}}')
+    elif key.startswith("Digit") and len(key) == 6:
+        char = key[5]
+        print(f'keystroke "{char}" using {{{mod_str}}}')
+    elif key == "Space":
+        print(f'key code 49 using {{{mod_str}}}')
+    else:
+        # Unsupported key form for this helper — surface the default
+        # so the test still runs (the user's actual hotkey will simply
+        # not be exercised correctly).
+        print(DEFAULT)
+except FileNotFoundError:
+    print(DEFAULT)
+except Exception:
+    print(DEFAULT)
+PY
+}
+
+HOTKEY_CMD=$(build_hotkey_command)
+HOTKEY_HUMAN=$(python3 - "$SETTINGS" <<'PY' 2>/dev/null
+import json, sys
+GLYPHS = {"super":"⌘","shift":"⇧","alt":"⌥","control":"⌃"}
+ORDER  = ["control","alt","shift","super"]
+try:
+    with open(sys.argv[1]) as f: s = json.load(f)
+    h = s.get("hotkey") or {}
+    mods = h.get("modifiers") or []
+    key = h.get("key") or "KeyC"
+    if key.startswith("Key"):   k = key[3:]
+    elif key.startswith("Digit"): k = key[5:]
+    else: k = key
+    glyphs = "".join(GLYPHS[m] for m in ORDER if m in mods)
+    print(glyphs + k)
+except Exception:
+    print("⌘⇧C")
+PY
+)
+
+# ───────── static checks ────────────────────────────────────────────
 
 step "1. Tauri dev binary alive"
 if pgrep -f "target/debug/${PROC}" >/dev/null; then
@@ -47,7 +110,7 @@ fi
 CT=$(curl -sI http://localhost:1420/chat.ts | awk -F': *' 'tolower($1)=="content-type" {print $2}' | tr -d '\r\n')
 case "$CT" in
   text/javascript*|application/javascript*) ok "/chat.ts served as JS ($CT)";;
-  *) bad "/chat.ts served as '$CT' (expected JS) — Vite likely not transpiling";;
+  *) bad "/chat.ts served as '$CT' (expected JS)";;
 esac
 
 CT2=$(curl -sI http://localhost:1420/settings.ts | awk -F': *' 'tolower($1)=="content-type" {print $2}' | tr -d '\r\n')
@@ -60,48 +123,38 @@ for f in marked.min.js highlight.min.js hljs-dark.css hljs-light.css; do
   if curl -sfI "http://localhost:1420/$f" >/dev/null; then
     ok "/$f served from public/"
   else
-    bad "/$f missing from public/"
+    bad "/$f missing"
   fi
 done
 
-step "3. Index HTML references resolvable module"
+step "3. HTML references resolvable modules"
 HTML=$(curl -s http://localhost:1420/)
-if echo "$HTML" | grep -q '<script type="module" src="/chat.ts"'; then
-  ok "index.html references /chat.ts"
-else
-  bad "index.html missing /chat.ts script tag"
-fi
-if echo "$HTML" | grep -q '<script src="/marked.min.js"'; then
-  ok "index.html references /marked.min.js"
-else
-  bad "index.html missing /marked.min.js script tag"
-fi
-
-step "4. Settings HTML references resolvable module"
+echo "$HTML" | grep -q '<script type="module" src="/chat.ts"' \
+  && ok "index.html references /chat.ts" \
+  || bad "index.html missing /chat.ts"
+echo "$HTML" | grep -q '<script src="/marked.min.js"' \
+  && ok "index.html references /marked.min.js" \
+  || bad "index.html missing /marked.min.js"
 HTML2=$(curl -s http://localhost:1420/settings.html)
-if echo "$HTML2" | grep -q '<script type="module" src="/settings.ts"'; then
-  ok "settings.html references /settings.ts"
-else
-  bad "settings.html missing /settings.ts script tag"
-fi
+echo "$HTML2" | grep -q '<script type="module" src="/settings.ts"' \
+  && ok "settings.html references /settings.ts" \
+  || bad "settings.html missing /settings.ts"
 
-step "5. Vitest unit suite green"
+step "4. Vitest unit suite green"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 if (cd "$ROOT" && npm test --silent >/dev/null 2>&1); then
   ok "all 56 unit tests pass"
 else
-  bad "unit tests failing — see \`npm test\`"
+  bad "unit tests failing — run \`npm test\` to debug"
 fi
 
-# ───────── interactive checks (osascript / Accessibility) ─────────────
+# ───────── interactive checks ────────────────────────────────────────
 
 if [[ -n "${STATIC_ONLY:-}" ]]; then
   echo ""
-  echo "(skipping interactive checks: STATIC_ONLY set)"
+  echo "(STATIC_ONLY=1 — skipping interactive checks)"
 else
-  step "6. Accessibility permission for osascript"
-  # `keystroke ""` is a no-op that fails only when the parent terminal
-  # is missing Accessibility permission.
+  step "5. Accessibility permission"
   if osascript -e 'tell application "System Events" to keystroke ""' >/dev/null 2>&1; then
     ok "osascript can send keystrokes"
 
@@ -110,46 +163,63 @@ else
     }
     osa() { osascript -e "$1" >/dev/null 2>&1 || true; }
 
-    step "7. Cmd+Shift+C spawns a chat window"
+    echo ""
+    echo "  Using configured hotkey: $HOTKEY_HUMAN"
+    echo "  AppleScript: tell ... to $HOTKEY_CMD"
+
+    step "6. Hotkey spawns a chat window"
     BEFORE=$(count_windows)
-    osa 'tell application "System Events" to keystroke "c" using {command down, shift down}'
+    osa "tell application \"System Events\" to $HOTKEY_CMD"
     sleep 2.5
     AFTER=$(count_windows)
     echo "  windows: $BEFORE → $AFTER"
+    HOTKEY_OK=0
     if (( AFTER > BEFORE )); then
       ok "hotkey spawned a window"
+      HOTKEY_OK=1
     else
       bad "hotkey did not spawn a window"
     fi
 
-    step "8. Window stays alive after typing + submit"
-    osa 'tell application "System Events" to keystroke "ping"'
-    sleep 0.3
-    osa 'tell application "System Events" to key code 36'   # Return
-    sleep 6
-    STILL=$(count_windows)
-    if (( STILL >= AFTER )); then
-      ok "window still alive after submitting a message"
+    step "7. Window stays alive after typing + submit"
+    if (( HOTKEY_OK == 1 )); then
+      osa 'tell application "System Events" to keystroke "ping"'
+      sleep 0.4
+      osa 'tell application "System Events" to key code 36'   # Return
+      sleep 7
+      STILL=$(count_windows)
+      echo "  windows: $AFTER → $STILL"
+      if (( STILL >= AFTER )); then
+        ok "window still alive after submitting a message"
+      else
+        bad "window died on submit — JS likely threw"
+      fi
     else
-      bad "window died while submitting — JS likely threw"
+      skip "no window was spawned, can't test submit"
+      STILL=$AFTER
     fi
 
-    step "9. Esc closes the window"
-    osa 'tell application "System Events" to key code 53'
-    sleep 1.5
-    CLOSED=$(count_windows)
-    echo "  windows: $STILL → $CLOSED"
-    if (( CLOSED < STILL )); then
-      ok "Esc closed the window"
+    step "8. Esc closes the spawned window"
+    if (( HOTKEY_OK == 1 )); then
+      osa 'tell application "System Events" to key code 53'   # Esc
+      sleep 1.5
+      CLOSED=$(count_windows)
+      echo "  windows: $STILL → $CLOSED"
+      if (( CLOSED < STILL )); then
+        ok "Esc closed the window"
+      else
+        bad "Esc did not close the window"
+      fi
     else
-      bad "Esc did not close the window"
+      skip "no window to close"
     fi
 
-    step "10. Hotkey works a second time (no stale state)"
+    step "9. Hotkey works a second time"
     PRE=$(count_windows)
-    osa 'tell application "System Events" to keystroke "c" using {command down, shift down}'
+    osa "tell application \"System Events\" to $HOTKEY_CMD"
     sleep 2
     POST=$(count_windows)
+    echo "  windows: $PRE → $POST"
     if (( POST > PRE )); then
       ok "second hotkey press also worked"
       osa 'tell application "System Events" to key code 53'   # cleanup
@@ -158,18 +228,19 @@ else
       bad "second hotkey press did nothing"
     fi
   else
-    echo "  ⚠ osascript blocked — Terminal lacks Accessibility permission."
-    echo "    System Settings → Privacy & Security → Accessibility → ✓ Terminal"
-    echo "    (interactive checks skipped)"
+    echo "  ⚠ osascript blocked — Accessibility not granted."
+    echo "    System Settings → Privacy & Security → Accessibility → ✓ your terminal"
+    skip "interactive checks (Accessibility missing)"
   fi
 fi
 
-# ───────── summary ────────────────────────────────────────────────────
+# ───────── summary ───────────────────────────────────────────────────
 
 echo ""
 echo "──────────────────────────────────────"
-echo "passed: $PASS"
-echo "failed: $FAIL"
+echo "passed:  $PASS"
+echo "failed:  $FAIL"
+(( SKIP > 0 )) && echo "skipped: $SKIP"
 
 if (( FAIL == 0 )); then
   echo "🟢 Verification complete."
