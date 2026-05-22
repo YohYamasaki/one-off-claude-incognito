@@ -4,7 +4,7 @@ import {
   formatHotkey,
   MODIFIER_GLYPHS,
   MODIFIER_ORDER,
-} from "./keyboard.js";
+} from "./keyboard";
 
 describe("keyToGlyph", () => {
   it("strips 'Key' prefix for letter codes", () => {
@@ -56,7 +56,10 @@ describe("formatHotkey", () => {
     // Order in the input array shouldn't matter
     expect(formatHotkey({ modifiers: ["shift", "super"], key: "KeyC" })).toBe("⇧⌘C");
     expect(
-      formatHotkey({ modifiers: ["control", "alt", "shift", "super"], key: "KeyA" })
+      formatHotkey({
+        modifiers: ["control", "alt", "shift", "super"],
+        key: "KeyA",
+      }),
     ).toBe("⌃⌥⇧⌘A");
   });
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { createImeTracker } from "./ime.js";
+import { createImeTracker } from "./ime";
 
-function fakeEvent({ isComposing = false, keyCode = 13 } = {}) {
+function fakeEvent({ isComposing = false, keyCode = 13 }: { isComposing?: boolean; keyCode?: number } = {}) {
   return { isComposing, keyCode };
 }
 
@@ -47,9 +47,8 @@ describe("createImeTracker", () => {
   });
 
   it("layered defenses are independent (any positive signal wins)", () => {
-    let t = 0;
-    const ime = createImeTracker(() => t);
-    // Composition explicitly cleared, but event.isComposing still true → busy
+    const ime = createImeTracker(() => 0);
+    // event.isComposing alone is enough
     expect(ime.isBusy(fakeEvent({ isComposing: true }))).toBe(true);
     // Both signals false → not busy
     expect(ime.isBusy(fakeEvent())).toBe(false);

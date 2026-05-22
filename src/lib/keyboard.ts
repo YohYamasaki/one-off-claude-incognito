@@ -1,7 +1,7 @@
 // Mapping helpers for rendering KeyboardEvent.code values as macOS-style
 // glyphs (used in the settings window's hotkey pill).
 
-export const MODIFIER_GLYPHS = {
+export const MODIFIER_GLYPHS: Readonly<Record<string, string>> = {
   super: "⌘",
   shift: "⇧",
   alt: "⌥",
@@ -9,9 +9,14 @@ export const MODIFIER_GLYPHS = {
 };
 
 // Standard macOS order for modifier display (left to right).
-export const MODIFIER_ORDER = ["control", "alt", "shift", "super"];
+export const MODIFIER_ORDER: readonly string[] = [
+  "control",
+  "alt",
+  "shift",
+  "super",
+];
 
-const NAMED_KEYS = {
+const NAMED_KEYS: Readonly<Record<string, string>> = {
   Space: "␣",
   Enter: "↩",
   Tab: "⇥",
@@ -31,9 +36,14 @@ const NAMED_KEYS = {
   Backslash: "\\",
 };
 
-const ARROW_GLYPHS = { Up: "↑", Down: "↓", Left: "←", Right: "→" };
+const ARROW_GLYPHS: Readonly<Record<string, string>> = {
+  Up: "↑",
+  Down: "↓",
+  Left: "←",
+  Right: "→",
+};
 
-export function keyToGlyph(code) {
+export function keyToGlyph(code: string): string {
   if (!code) return "";
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
@@ -46,7 +56,12 @@ export function keyToGlyph(code) {
   return code;
 }
 
-export function formatHotkey(cfg) {
+export interface HotkeyConfig {
+  readonly modifiers: readonly string[];
+  readonly key: string;
+}
+
+export function formatHotkey(cfg: HotkeyConfig | null | undefined): string {
   if (!cfg) return "";
   const ordered = MODIFIER_ORDER.filter((m) => cfg.modifiers.includes(m));
   const glyphs = ordered.map((m) => MODIFIER_GLYPHS[m] || m).join("");

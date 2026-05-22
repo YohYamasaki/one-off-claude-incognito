@@ -2,7 +2,7 @@
 // additional "Extra high" tier but the CLI rejects it, so the app exposes
 // only the four CLI-supported levels.
 
-export const EFFORT_LABELS = {
+export const EFFORT_LABELS: Readonly<Record<string, string>> = {
   low: "low",
   medium: "medium",
   high: "high",
@@ -11,7 +11,7 @@ export const EFFORT_LABELS = {
 
 export const DEFAULT_EFFORT = "low";
 
-export function canonicalizeEffort(e) {
+export function canonicalizeEffort(e: string | null | undefined): string {
   // The pre-rename build used "default" to mean "don't pass --effort".
   // Map that (and any empty/missing value) to "low", which is the new
   // entry-level the app exposes.

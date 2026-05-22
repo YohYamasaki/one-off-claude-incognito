@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { canonicalizeModel, modelShort, MODELS, MODEL_ALIAS, DEFAULT_MODEL } from "./models.js";
+import {
+  canonicalizeModel,
+  modelShort,
+  MODELS,
+  MODEL_ALIAS,
+  DEFAULT_MODEL,
+} from "./models";
 
 describe("canonicalizeModel", () => {
   it("maps the legacy short alias 'sonnet' to claude-sonnet-4-6", () => {

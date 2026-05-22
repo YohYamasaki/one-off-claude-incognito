@@ -1,27 +1,59 @@
-import { MODELS, DEFAULT_MODEL, canonicalizeModel, modelShort } from "./lib/models.js";
-import { EFFORT_LABELS, canonicalizeEffort } from "./lib/effort.js";
-import { parseClaudeEvent } from "./lib/events.js";
-import { createImeTracker } from "./lib/ime.js";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import {
+  getCurrentWindow,
+  LogicalPosition,
+  LogicalSize,
+} from "@tauri-apps/api/window";
 
-// MODELS is imported for completeness — chat.js mainly uses the alias map
-// and short-label helpers; the popover options live in HTML.
-void MODELS;
+import { DEFAULT_MODEL, canonicalizeModel, modelShort } from "./lib/models";
+import { EFFORT_LABELS, canonicalizeEffort } from "./lib/effort";
+import { parseClaudeEvent } from "./lib/events";
+import { createImeTracker } from "./lib/ime";
 
-const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
-const currentWindow = window.__TAURI__.window.getCurrentWindow();
-const { LogicalSize, LogicalPosition } = window.__TAURI__.window;
+// External browser libraries loaded via <script> tags from `public/`.
+declare global {
+  interface Window {
+    marked?: {
+      parse(text: string, options?: { breaks?: boolean; gfm?: boolean }): string;
+    };
+    hljs?: {
+      configure(opts: { ignoreUnescapedHTML?: boolean; throwUnescapedHTML?: boolean }): void;
+      highlightElement(el: HTMLElement): void;
+    };
+  }
+}
+
+interface AssistantBubble {
+  root: HTMLDivElement;
+  thinking: HTMLDivElement;
+  thinkingHeader: HTMLButtonElement;
+  thinkingLabel: HTMLSpanElement;
+  thinkingBody: HTMLDivElement;
+  text: HTMLDivElement;
+  thinkingStr: string;
+  textStr: string;
+  thinkingStartedAt: number | null;
+  thinkingDoneAt: number | null;
+  rafScheduled: boolean;
+}
+
+interface SessionInfo {
+  model?: string | null;
+  effort?: string | null;
+}
+
+const currentWindow = getCurrentWindow();
 const WINDOW_LABEL = currentWindow.label;
 
 // ───────── module state ─────────
 
 let isStreaming = false;
-let currentBubble = null;
+let currentBubble: AssistantBubble | null = null;
 
 let sessionModel = DEFAULT_MODEL;
 let sessionEffort = "low";
 
-// Window auto-resize bookkeeping
 const MIN_HEIGHT = 240;
 const MAX_HEIGHT = 760;
 let lastSyncedHeight = MIN_HEIGHT;
@@ -32,13 +64,18 @@ const ime = createImeTracker();
 
 // ───────── DOM ─────────
 
-const $ = (id) => document.getElementById(id);
-const messagesEl = $("messages");
-const inputEl = $("input");
-const composerEl = $("composer");
-const sendBtnEl = $("send-btn");
-const closeBtnEl = $("close-btn");
-const modelChipEl = $("model-chip");
+function $<T extends HTMLElement = HTMLElement>(id: string): T {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`element not found: #${id}`);
+  return el as T;
+}
+
+const messagesEl = $<HTMLDivElement>("messages");
+const inputEl = $<HTMLTextAreaElement>("input");
+const composerEl = $<HTMLFormElement>("composer");
+const sendBtnEl = $<HTMLButtonElement>("send-btn");
+const closeBtnEl = $<HTMLButtonElement>("close-btn");
+const modelChipEl = $<HTMLButtonElement>("model-chip");
 const modelChipModel = $("model-chip-model");
 const modelChipEffort = $("model-chip-effort");
 const popoverEl = $("model-popover");
@@ -56,24 +93,25 @@ if (window.hljs && typeof window.hljs.configure === "function") {
   });
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text: string): string {
   if (!text) return "";
   if (window.marked) {
     return window.marked.parse(text, { breaks: true, gfm: true });
   }
   const escaped = text.replace(/[&<>"']/g, (ch) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch])
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch] || ch,
   );
   return `<pre>${escaped}</pre>`;
 }
 
-function processCodeBlocks(container) {
-  if (!container) return;
-  container.querySelectorAll("pre > code").forEach((codeEl) => {
+function processCodeBlocks(container: HTMLElement): void {
+  container.querySelectorAll<HTMLElement>("pre > code").forEach((codeEl) => {
     if (window.hljs && !codeEl.classList.contains("hljs")) {
       try {
         window.hljs.highlightElement(codeEl);
-      } catch (_) {}
+      } catch {
+        /* mid-stream incomplete fences sometimes trip hljs */
+      }
     }
     const pre = codeEl.parentElement;
     if (pre && !pre.querySelector(".copy-btn")) {
@@ -109,7 +147,7 @@ function processCodeBlocks(container) {
 const THINKING_DOTS_HTML =
   '<div class="thinking-dots" aria-label="Waiting"><span></span><span></span><span></span></div>';
 
-function makeAssistantBubble() {
+function makeAssistantBubble(): AssistantBubble {
   const root = document.createElement("div");
   root.className = "bubble assistant streaming";
 
@@ -149,7 +187,7 @@ function makeAssistantBubble() {
     root,
     thinking,
     thinkingHeader,
-    thinkingLabel: thinkingHeader.querySelector(".thinking-label"),
+    thinkingLabel: thinkingHeader.querySelector(".thinking-label") as HTMLSpanElement,
     thinkingBody,
     text,
     thinkingStr: "",
@@ -160,7 +198,7 @@ function makeAssistantBubble() {
   };
 }
 
-function addUserBubble(text) {
+function addUserBubble(text: string): void {
   const div = document.createElement("div");
   div.className = "bubble user";
   div.textContent = text;
@@ -169,7 +207,7 @@ function addUserBubble(text) {
   debouncedSyncHeight();
 }
 
-function appendAssistantBubble() {
+function appendAssistantBubble(): AssistantBubble {
   const b = makeAssistantBubble();
   messagesEl.appendChild(b.root);
   scrollToBottom();
@@ -179,7 +217,7 @@ function appendAssistantBubble() {
 
 // ───────── rendering ─────────
 
-function scheduleRender() {
+function scheduleRender(): void {
   if (!currentBubble || currentBubble.rafScheduled) return;
   const b = currentBubble;
   b.rafScheduled = true;
@@ -193,14 +231,13 @@ function scheduleRender() {
       processCodeBlocks(b.text);
     }
     scrollToBottom();
-    // Intentionally NOT calling debouncedSyncHeight here — we only want to
-    // resize the window when bubble *count* changes, not on every streamed
-    // delta. Streaming text simply scrolls inside the current size.
+    // We intentionally don't resize the window on every streaming delta —
+    // only on bubble count changes (see addUserBubble / appendAssistantBubble
+    // / finalizeBubble).
   });
 }
 
-function showThinkingSection(b) {
-  if (!b) return;
+function showThinkingSection(b: AssistantBubble): void {
   if (b.thinking.hidden) {
     b.thinking.hidden = false;
     b.thinking.classList.remove("collapsed");
@@ -208,19 +245,18 @@ function showThinkingSection(b) {
   }
 }
 
-function finalizeThinking(b) {
-  if (!b || b.thinking.hidden) return;
+function finalizeThinking(b: AssistantBubble): void {
+  if (b.thinking.hidden) return;
   if (b.thinkingDoneAt) return;
   b.thinkingDoneAt = performance.now();
-  const elapsedMs = b.thinkingDoneAt - (b.thinkingStartedAt || b.thinkingDoneAt);
+  const elapsedMs = b.thinkingDoneAt - (b.thinkingStartedAt ?? b.thinkingDoneAt);
   const secs = Math.max(1, Math.round(elapsedMs / 1000));
   b.thinking.classList.add("done");
   b.thinking.classList.add("collapsed");
   b.thinkingLabel.textContent = `Thought for ${secs}s`;
 }
 
-function finalizeBubble(b) {
-  if (!b) return;
+function finalizeBubble(b: AssistantBubble): void {
   finalizeThinking(b);
   b.root.classList.remove("streaming");
   if (b.textStr) {
@@ -234,7 +270,7 @@ function finalizeBubble(b) {
 }
 
 let scrollRafPending = false;
-function scrollToBottom() {
+function scrollToBottom(): void {
   if (scrollRafPending) return;
   scrollRafPending = true;
   requestAnimationFrame(() => {
@@ -245,16 +281,16 @@ function scrollToBottom() {
 
 // ───────── window auto-resize ─────────
 
-function debouncedSyncHeight() {
+function debouncedSyncHeight(): void {
   if (syncScheduled) return;
   syncScheduled = true;
   setTimeout(() => {
     syncScheduled = false;
-    syncWindowHeight();
+    void syncWindowHeight();
   }, 60);
 }
 
-function computeDesiredHeight() {
+function computeDesiredHeight(): number {
   const titlebarH = titlebarEl.offsetHeight;
   const composerH = composerEl.offsetHeight;
   const messagesH = messagesEl.scrollHeight;
@@ -263,7 +299,7 @@ function computeDesiredHeight() {
   return Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, desired));
 }
 
-async function syncWindowHeight() {
+async function syncWindowHeight(): Promise<void> {
   if (resizeTweenActive) return;
   const target = computeDesiredHeight();
   if (Math.abs(target - lastSyncedHeight) < 6) return;
@@ -271,7 +307,7 @@ async function syncWindowHeight() {
   lastSyncedHeight = target;
 }
 
-async function tweenWindowHeight(targetH) {
+async function tweenWindowHeight(targetH: number): Promise<void> {
   resizeTweenActive = true;
   try {
     const scale = await currentWindow.scaleFactor();
@@ -281,19 +317,20 @@ async function tweenWindowHeight(targetH) {
     const startLogicalW = outer.width / scale;
     const startLogicalX = pos.x / scale;
     const startLogicalY = pos.y / scale;
+    // Always anchor to the current bottom edge — respect manual window moves.
     const bottom = startLogicalY + startLogicalH;
 
     const startTime = performance.now();
     const duration = 220;
 
-    await new Promise((resolve) => {
-      function step(now) {
+    await new Promise<void>((resolve) => {
+      function step(now: number): void {
         const t = Math.min(1, (now - startTime) / duration);
         const eased = 1 - Math.pow(1 - t, 3);
         const h = Math.round(startLogicalH + (targetH - startLogicalH) * eased);
         const y = Math.round(bottom - h);
-        currentWindow.setSize(new LogicalSize(startLogicalW, h));
-        currentWindow.setPosition(new LogicalPosition(startLogicalX, y));
+        void currentWindow.setSize(new LogicalSize(startLogicalW, h));
+        void currentWindow.setPosition(new LogicalPosition(startLogicalX, y));
         if (t < 1) {
           requestAnimationFrame(step);
         } else {
@@ -312,14 +349,14 @@ async function tweenWindowHeight(targetH) {
 
 // ───────── composer ─────────
 
-function setStreaming(on) {
+function setStreaming(on: boolean): void {
   isStreaming = on;
   inputEl.disabled = on;
   sendBtnEl.disabled = on;
   if (!on) inputEl.focus();
 }
 
-async function send() {
+async function send(): Promise<void> {
   const text = inputEl.value.trim();
   if (!text || isStreaming) return;
   inputEl.value = "";
@@ -338,50 +375,49 @@ async function send() {
   }
 }
 
-function autoResize() {
+function autoResize(): void {
   inputEl.style.height = "auto";
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + "px";
 }
 
 composerEl.addEventListener("submit", (e) => {
   e.preventDefault();
-  send();
+  void send();
 });
 
 inputEl.addEventListener("input", () => {
   autoResize();
 });
 
-// IME composition tracking
 inputEl.addEventListener("compositionstart", () => ime.onCompositionStart());
 inputEl.addEventListener("compositionend", () => ime.onCompositionEnd());
 
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !ime.isBusy(e)) {
     e.preventDefault();
-    send();
+    void send();
   } else if (e.key === "Escape" && !popoverEl.classList.contains("open")) {
     e.preventDefault();
-    currentWindow.close();
+    void currentWindow.close();
   }
 });
 
-closeBtnEl.addEventListener("click", () => currentWindow.close());
+closeBtnEl.addEventListener("click", () => void currentWindow.close());
 
 // ───────── model/effort chip ─────────
 
-function renderChip() {
+function renderChip(): void {
   modelChipModel.textContent = modelShort(sessionModel);
-  modelChipEffort.textContent = EFFORT_LABELS[sessionEffort] || sessionEffort;
-  popoverModelsEl.querySelectorAll("button").forEach((btn) => {
+  modelChipEffort.textContent = EFFORT_LABELS[sessionEffort] ?? sessionEffort;
+  popoverModelsEl.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.value === sessionModel);
   });
-  popoverEffortsEl.querySelectorAll("button").forEach((btn) => {
+  popoverEffortsEl.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.value === sessionEffort);
   });
 }
 
-async function openPopover() {
+async function openPopover(): Promise<void> {
   if (window.innerHeight < MAX_HEIGHT - 20) {
     await tweenWindowHeight(MAX_HEIGHT);
   }
@@ -395,7 +431,7 @@ async function openPopover() {
   popoverStatusEl.textContent = "";
 }
 
-function closePopover() {
+function closePopover(): void {
   popoverEl.classList.remove("open");
   modelChipEl.setAttribute("aria-expanded", "false");
   setTimeout(() => {
@@ -406,12 +442,13 @@ function closePopover() {
 modelChipEl.addEventListener("click", (e) => {
   e.stopPropagation();
   if (popoverEl.classList.contains("open")) closePopover();
-  else openPopover();
+  else void openPopover();
 });
 
 document.addEventListener("click", (e) => {
   if (!popoverEl.classList.contains("open")) return;
-  if (popoverEl.contains(e.target) || modelChipEl.contains(e.target)) return;
+  const target = e.target as Node;
+  if (popoverEl.contains(target) || modelChipEl.contains(target)) return;
   closePopover();
 });
 
@@ -423,21 +460,28 @@ window.addEventListener("keydown", (e) => {
 
 // ───────── confirmation modal ─────────
 
-function showConfirmModal({ title, bodyHtml, confirmText = "OK", danger = false }) {
+interface ConfirmModalOpts {
+  title: string;
+  bodyHtml: string;
+  confirmText?: string;
+  danger?: boolean;
+}
+
+function showConfirmModal({ title, bodyHtml, confirmText = "OK", danger = false }: ConfirmModalOpts): Promise<boolean> {
   return new Promise((resolve) => {
     const modal = $("confirm-modal");
     $("modal-title").textContent = title;
     $("modal-body").innerHTML = bodyHtml;
-    const confirmBtn = $("modal-confirm");
+    const confirmBtn = $<HTMLButtonElement>("modal-confirm");
     confirmBtn.textContent = confirmText;
     confirmBtn.classList.toggle("danger", danger);
-    const cancelBtn = $("modal-cancel");
+    const cancelBtn = $<HTMLButtonElement>("modal-cancel");
 
     modal.hidden = false;
     requestAnimationFrame(() => modal.classList.add("open"));
 
     let done = false;
-    const cleanup = (result) => {
+    const cleanup = (result: boolean): void => {
       if (done) return;
       done = true;
       modal.classList.remove("open");
@@ -450,12 +494,12 @@ function showConfirmModal({ title, bodyHtml, confirmText = "OK", danger = false 
       document.removeEventListener("keydown", onKey, true);
       resolve(result);
     };
-    const onCancel = () => cleanup(false);
-    const onConfirm = () => cleanup(true);
-    const onBackdrop = (e) => {
+    const onCancel = (): void => cleanup(false);
+    const onConfirm = (): void => cleanup(true);
+    const onBackdrop = (e: MouseEvent): void => {
       if (e.target === modal) cleanup(false);
     };
-    const onKey = (e) => {
+    const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -474,13 +518,13 @@ function showConfirmModal({ title, bodyHtml, confirmText = "OK", danger = false 
   });
 }
 
-function escapeHtml(s) {
+function escapeHtml(s: string): string {
   return String(s).replace(/[&<>"']/g, (ch) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch])
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch] || ch,
   );
 }
 
-async function applyModelEffort(model, effort) {
+async function applyModelEffort(model: string, effort: string): Promise<void> {
   if (model === sessionModel && effort === sessionEffort) return;
   const hasMessages = messagesEl.querySelectorAll(".bubble").length > 0;
 
@@ -488,7 +532,7 @@ async function applyModelEffort(model, effort) {
     closePopover();
     const ok = await showConfirmModal({
       title: "Switch model?",
-      bodyHtml: `Switching to <strong>${escapeHtml(modelShort(model))} · ${escapeHtml(EFFORT_LABELS[effort] || effort)}</strong> restarts this chat. The current conversation will be cleared.`,
+      bodyHtml: `Switching to <strong>${escapeHtml(modelShort(model))} · ${escapeHtml(EFFORT_LABELS[effort] ?? effort)}</strong> restarts this chat. The current conversation will be cleared.`,
       confirmText: "Switch & Clear",
       danger: true,
     });
@@ -505,7 +549,7 @@ async function applyModelEffort(model, effort) {
       messagesEl.innerHTML = "";
       const note = document.createElement("div");
       note.className = "system-note";
-      note.textContent = `Switched to ${modelShort(model)} · ${EFFORT_LABELS[effort] || effort}`;
+      note.textContent = `Switched to ${modelShort(model)} · ${EFFORT_LABELS[effort] ?? effort}`;
       messagesEl.appendChild(note);
       debouncedSyncHeight();
     }
@@ -516,21 +560,21 @@ async function applyModelEffort(model, effort) {
   }
 }
 
-popoverModelsEl.querySelectorAll("button").forEach((btn) => {
+popoverModelsEl.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
   btn.addEventListener("click", () => {
-    applyModelEffort(btn.dataset.value, sessionEffort);
+    void applyModelEffort(btn.dataset.value ?? "", sessionEffort);
   });
 });
-popoverEffortsEl.querySelectorAll("button").forEach((btn) => {
+popoverEffortsEl.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
   btn.addEventListener("click", () => {
-    applyModelEffort(sessionModel, btn.dataset.value);
+    void applyModelEffort(sessionModel, btn.dataset.value ?? "");
   });
 });
 
 // ───────── claude event handling ─────────
 
-listen(`claude-event-${WINDOW_LABEL}`, (e) => {
-  let payload;
+void listen<string>(`claude-event-${WINDOW_LABEL}`, (e) => {
+  let payload: unknown;
   try {
     payload = JSON.parse(e.payload);
   } catch (err) {
@@ -585,12 +629,12 @@ listen(`claude-event-${WINDOW_LABEL}`, (e) => {
   }
 });
 
-listen(`claude-end-${WINDOW_LABEL}`, () => {
+void listen(`claude-end-${WINDOW_LABEL}`, () => {
   if (currentBubble) finalizeBubble(currentBubble);
   setStreaming(false);
 });
 
-listen(`session-error-${WINDOW_LABEL}`, (e) => {
+void listen<string>(`session-error-${WINDOW_LABEL}`, (e) => {
   const div = document.createElement("div");
   div.className = "bubble error";
   div.textContent =
@@ -604,27 +648,33 @@ listen(`session-error-${WINDOW_LABEL}`, (e) => {
 
 // ───────── boot ─────────
 
-async function loadSessionInfo() {
+async function loadSessionInfo(): Promise<void> {
   try {
-    const info = await invoke("get_window_session_info");
+    const info = await invoke<SessionInfo | null>("get_window_session_info");
     if (info) {
       sessionModel = canonicalizeModel(info.model);
       sessionEffort = canonicalizeEffort(info.effort);
     } else {
-      const s = await invoke("get_settings");
+      const s = await invoke<SessionInfo>("get_settings");
       sessionModel = canonicalizeModel(s.model);
       sessionEffort = canonicalizeEffort(s.effort);
     }
-  } catch (_) {}
+  } catch {
+    /* keep defaults */
+  }
   renderChip();
 }
 
-window.addEventListener("DOMContentLoaded", async () => {
+window.addEventListener("DOMContentLoaded", () => {
   inputEl.focus();
-  await loadSessionInfo();
-  try {
-    const scale = await currentWindow.scaleFactor();
-    const outer = await currentWindow.outerSize();
-    lastSyncedHeight = outer.height / scale;
-  } catch (_) {}
+  void loadSessionInfo();
+  void (async () => {
+    try {
+      const scale = await currentWindow.scaleFactor();
+      const outer = await currentWindow.outerSize();
+      lastSyncedHeight = outer.height / scale;
+    } catch {
+      /* nothing */
+    }
+  })();
 });

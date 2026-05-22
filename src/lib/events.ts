@@ -6,12 +6,22 @@
 // Returns null when the payload is irrelevant to the UI (system inits,
 // rate-limit events, content_block_stop, message_delta, etc.).
 
-export function parseClaudeEvent(payload) {
+export type ClaudeEvent =
+  | { kind: "thinking-start" }
+  | { kind: "thinking-delta"; text: string }
+  | { kind: "text-delta"; text: string }
+  | { kind: "result"; result: string; isError: boolean }
+  | { kind: "assistant-final"; text: string };
+
+type Anyish = Record<string, any>;
+
+export function parseClaudeEvent(payload: unknown): ClaudeEvent | null {
   if (!payload || typeof payload !== "object") return null;
-  const type = payload.type;
+  const p = payload as Anyish;
+  const type = p.type;
 
   if (type === "stream_event") {
-    const ev = payload.event;
+    const ev = p.event;
     if (!ev || typeof ev !== "object") return null;
 
     if (ev.type === "content_block_start") {
@@ -39,17 +49,17 @@ export function parseClaudeEvent(payload) {
   if (type === "result") {
     return {
       kind: "result",
-      result: payload.result || "",
-      isError: !!payload.is_error,
+      result: p.result || "",
+      isError: !!p.is_error,
     };
   }
 
   if (type === "assistant") {
-    const content = payload.message && payload.message.content;
+    const content = p.message?.content;
     if (Array.isArray(content)) {
       const text = content
-        .filter((c) => c && c.type === "text")
-        .map((c) => c.text || "")
+        .filter((c: Anyish) => c && c.type === "text")
+        .map((c: Anyish) => c.text || "")
         .join("");
       if (text) return { kind: "assistant-final", text };
     }

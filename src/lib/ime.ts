@@ -12,7 +12,20 @@
 
 const POST_COMPOSITION_GRACE_MS = 50;
 
-export function createImeTracker(now = () => performance.now()) {
+export interface ImeKeyEvent {
+  readonly isComposing?: boolean;
+  readonly keyCode?: number;
+}
+
+export interface ImeTracker {
+  onCompositionStart(): void;
+  onCompositionEnd(): void;
+  isBusy(e?: ImeKeyEvent | null): boolean;
+}
+
+export function createImeTracker(
+  now: () => number = () => performance.now(),
+): ImeTracker {
   let composing = false;
   let lastEndTime = 0;
   return {

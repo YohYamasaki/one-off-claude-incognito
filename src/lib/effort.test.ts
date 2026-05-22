@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canonicalizeEffort, EFFORT_LABELS, DEFAULT_EFFORT } from "./effort.js";
+import { canonicalizeEffort, EFFORT_LABELS, DEFAULT_EFFORT } from "./effort";
 
 describe("canonicalizeEffort", () => {
   it("migrates the legacy 'default' value to 'low'", () => {

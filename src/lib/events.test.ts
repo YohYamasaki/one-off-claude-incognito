@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseClaudeEvent } from "./events.js";
+import { parseClaudeEvent } from "./events";
 
 describe("parseClaudeEvent", () => {
   it("returns null for falsy or non-object payloads", () => {
@@ -21,7 +21,7 @@ describe("parseClaudeEvent", () => {
         parseClaudeEvent({
           type: "stream_event",
           event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hi" } },
-        })
+        }),
       ).toEqual({ kind: "text-delta", text: "Hi" });
     });
 
@@ -33,7 +33,7 @@ describe("parseClaudeEvent", () => {
             type: "content_block_delta",
             delta: { type: "thinking_delta", thinking: "pondering" },
           },
-        })
+        }),
       ).toEqual({ kind: "thinking-delta", text: "pondering" });
     });
 
@@ -45,7 +45,7 @@ describe("parseClaudeEvent", () => {
             type: "content_block_delta",
             delta: { type: "text_delta", text: "こんにちは 🌸" },
           },
-        })
+        }),
       ).toEqual({ kind: "text-delta", text: "こんにちは 🌸" });
     });
 
@@ -54,13 +54,13 @@ describe("parseClaudeEvent", () => {
         parseClaudeEvent({
           type: "stream_event",
           event: { type: "content_block_delta", delta: { type: "text_delta" } },
-        })
+        }),
       ).toEqual({ kind: "text-delta", text: "" });
       expect(
         parseClaudeEvent({
           type: "stream_event",
           event: { type: "content_block_delta", delta: { type: "thinking_delta" } },
-        })
+        }),
       ).toEqual({ kind: "thinking-delta", text: "" });
     });
 
@@ -69,17 +69,13 @@ describe("parseClaudeEvent", () => {
         parseClaudeEvent({
           type: "stream_event",
           event: { type: "content_block_delta", delta: { type: "tool_use_delta" } },
-        })
+        }),
       ).toBeNull();
     });
 
     it("returns null when the event payload is malformed", () => {
-      expect(
-        parseClaudeEvent({ type: "stream_event", event: null })
-      ).toBeNull();
-      expect(
-        parseClaudeEvent({ type: "stream_event", event: "oops" })
-      ).toBeNull();
+      expect(parseClaudeEvent({ type: "stream_event", event: null })).toBeNull();
+      expect(parseClaudeEvent({ type: "stream_event", event: "oops" })).toBeNull();
     });
   });
 
@@ -89,7 +85,7 @@ describe("parseClaudeEvent", () => {
         parseClaudeEvent({
           type: "stream_event",
           event: { type: "content_block_start", content_block: { type: "thinking" } },
-        })
+        }),
       ).toEqual({ kind: "thinking-start" });
     });
 
@@ -98,33 +94,33 @@ describe("parseClaudeEvent", () => {
         parseClaudeEvent({
           type: "stream_event",
           event: { type: "content_block_start", content_block: { type: "text" } },
-        })
+        }),
       ).toBeNull();
       expect(
         parseClaudeEvent({
           type: "stream_event",
           event: { type: "content_block_start", content_block: { type: "tool_use" } },
-        })
+        }),
       ).toBeNull();
     });
   });
 
   it("ignores content_block_stop, message_delta, message_stop", () => {
     expect(
-      parseClaudeEvent({ type: "stream_event", event: { type: "content_block_stop", index: 0 } })
+      parseClaudeEvent({ type: "stream_event", event: { type: "content_block_stop", index: 0 } }),
     ).toBeNull();
     expect(
-      parseClaudeEvent({ type: "stream_event", event: { type: "message_delta", delta: {} } })
+      parseClaudeEvent({ type: "stream_event", event: { type: "message_delta", delta: {} } }),
     ).toBeNull();
     expect(
-      parseClaudeEvent({ type: "stream_event", event: { type: "message_stop" } })
+      parseClaudeEvent({ type: "stream_event", event: { type: "message_stop" } }),
     ).toBeNull();
   });
 
   describe("result", () => {
     it("extracts result text and the error flag", () => {
       expect(
-        parseClaudeEvent({ type: "result", result: "all good", is_error: false })
+        parseClaudeEvent({ type: "result", result: "all good", is_error: false }),
       ).toEqual({ kind: "result", result: "all good", isError: false });
     });
 
@@ -156,7 +152,7 @@ describe("parseClaudeEvent", () => {
               { type: "text", text: " world" },
             ],
           },
-        })
+        }),
       ).toEqual({ kind: "assistant-final", text: "Hello world" });
     });
 
@@ -170,7 +166,7 @@ describe("parseClaudeEvent", () => {
               { type: "text", text: "answer" },
             ],
           },
-        })
+        }),
       ).toEqual({ kind: "assistant-final", text: "answer" });
     });
 
@@ -179,7 +175,7 @@ describe("parseClaudeEvent", () => {
         parseClaudeEvent({
           type: "assistant",
           message: { content: [{ type: "thinking", thinking: "x" }] },
-        })
+        }),
       ).toBeNull();
     });
 

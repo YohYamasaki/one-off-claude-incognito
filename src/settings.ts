@@ -1,74 +1,95 @@
-import { formatHotkey } from "./lib/keyboard.js";
-import { canonicalizeEffort } from "./lib/effort.js";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
-const { invoke } = window.__TAURI__.core;
-const currentWindow = window.__TAURI__.window.getCurrentWindow();
+import { formatHotkey, HotkeyConfig } from "./lib/keyboard";
+import { canonicalizeEffort } from "./lib/effort";
 
-const state = {
-  current: null, // { hotkey: {modifiers, key}, model, effort }
+interface Settings {
+  hotkey: HotkeyConfig;
+  model: string;
+  effort: string;
+}
+
+interface State {
+  current: Settings | null;
+  draft: Settings | null;
+  recording: boolean;
+}
+
+const currentWindow = getCurrentWindow();
+
+const state: State = {
+  current: null,
   draft: null,
   recording: false,
 };
 
-const $ = (id) => document.getElementById(id);
+function $<T extends HTMLElement = HTMLElement>(id: string): T {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`element not found: #${id}`);
+  return el as T;
+}
+
 const hotkeyText = $("hotkey-text");
-const hotkeyDisplay = $("hotkey-display");
-const hotkeyRecordBtn = $("hotkey-record");
+const hotkeyDisplay = $<HTMLButtonElement>("hotkey-display");
+const hotkeyRecordBtn = $<HTMLButtonElement>("hotkey-record");
 const hotkeyHint = $("hotkey-hint");
 const modelSeg = $("model-seg");
 const effortSeg = $("effort-seg");
-const saveBtn = $("save-btn");
+const saveBtn = $<HTMLButtonElement>("save-btn");
 const saveStatus = $("save-status");
-const closeBtn = $("close-btn");
+const closeBtn = $<HTMLButtonElement>("close-btn");
 
-function renderHotkey(cfg) {
+function renderHotkey(cfg: HotkeyConfig): void {
   hotkeyText.textContent = formatHotkey(cfg);
 }
 
-function renderSegmented(group, value) {
-  group.querySelectorAll("button").forEach((btn) => {
+function renderSegmented(group: HTMLElement, value: string): void {
+  group.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
     btn.setAttribute("aria-checked", btn.dataset.value === value ? "true" : "false");
     btn.classList.toggle("active", btn.dataset.value === value);
   });
 }
 
-function setDraft(updater) {
+function setDraft(updater: (s: Settings) => Settings): void {
+  if (!state.draft) return;
   state.draft = updater({ ...state.draft });
   refreshUI();
   saveStatus.textContent = "";
   saveStatus.classList.remove("ok", "err");
 }
 
-function refreshUI() {
+function refreshUI(): void {
   if (!state.draft) return;
   renderHotkey(state.draft.hotkey);
   renderSegmented(modelSeg, state.draft.model);
   renderSegmented(effortSeg, state.draft.effort);
 }
 
-async function load() {
-  const s = await invoke("get_settings");
+async function load(): Promise<void> {
+  const s = await invoke<Settings>("get_settings");
   s.effort = canonicalizeEffort(s.effort);
   state.current = s;
-  state.draft = JSON.parse(JSON.stringify(s));
+  state.draft = JSON.parse(JSON.stringify(s)) as Settings;
   refreshUI();
 }
 
-function startRecording() {
+function startRecording(): void {
   state.recording = true;
   hotkeyDisplay.classList.add("recording");
   hotkeyText.textContent = "press keys…";
-  hotkeyHint.textContent = "Hold modifiers (⌘ ⇧ ⌥ ⌃) and press a key. Esc to cancel.";
+  hotkeyHint.textContent =
+    "Hold modifiers (⌘ ⇧ ⌥ ⌃) and press a key. Esc to cancel.";
 }
 
-function stopRecording() {
+function stopRecording(): void {
   state.recording = false;
   hotkeyDisplay.classList.remove("recording");
   hotkeyHint.textContent = "";
   refreshUI();
 }
 
-function handleRecordKeydown(e) {
+function handleRecordKeydown(e: KeyboardEvent): void {
   if (!state.recording) return;
   if (e.key === "Escape") {
     e.preventDefault();
@@ -89,7 +110,7 @@ function handleRecordKeydown(e) {
     return;
   }
   e.preventDefault();
-  const mods = [];
+  const mods: string[] = [];
   if (e.metaKey) mods.push("super");
   if (e.shiftKey) mods.push("shift");
   if (e.altKey) mods.push("alt");
@@ -110,25 +131,26 @@ hotkeyDisplay.addEventListener("click", startRecording);
 
 window.addEventListener("keydown", handleRecordKeydown, true);
 
-modelSeg.querySelectorAll("button").forEach((btn) => {
+modelSeg.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
   btn.addEventListener("click", () => {
-    setDraft((d) => ({ ...d, model: btn.dataset.value }));
+    setDraft((d) => ({ ...d, model: btn.dataset.value ?? d.model }));
   });
 });
 
-effortSeg.querySelectorAll("button").forEach((btn) => {
+effortSeg.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
   btn.addEventListener("click", () => {
-    setDraft((d) => ({ ...d, effort: btn.dataset.value }));
+    setDraft((d) => ({ ...d, effort: btn.dataset.value ?? d.effort }));
   });
 });
 
 saveBtn.addEventListener("click", async () => {
+  if (!state.draft) return;
   saveBtn.disabled = true;
   saveStatus.classList.remove("ok", "err");
   saveStatus.textContent = "Saving…";
   try {
     await invoke("update_settings", { newSettings: state.draft });
-    state.current = JSON.parse(JSON.stringify(state.draft));
+    state.current = JSON.parse(JSON.stringify(state.draft)) as Settings;
     saveStatus.textContent = "Saved ✓";
     saveStatus.classList.add("ok");
     setTimeout(() => {
@@ -143,13 +165,13 @@ saveBtn.addEventListener("click", async () => {
   }
 });
 
-closeBtn.addEventListener("click", () => currentWindow.close());
+closeBtn.addEventListener("click", () => void currentWindow.close());
 
 window.addEventListener("keydown", (e) => {
   if (!state.recording && e.key === "Escape") {
     e.preventDefault();
-    currentWindow.close();
+    void currentWindow.close();
   }
 });
 
-load();
+void load();
