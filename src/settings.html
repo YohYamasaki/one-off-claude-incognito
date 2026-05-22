@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Settings</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="settings.js" defer></script>
+  </head>
+  <body>
+    <main id="app" class="settings-app">
+      <header id="titlebar" data-tauri-drag-region>
+        <span id="titlebar-label" data-tauri-drag-region>settings</span>
+        <button
+          id="close-btn"
+          type="button"
+          aria-label="Close window"
+          title="Close (Esc)"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path
+              d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </header>
+
+      <div class="settings-body">
+        <section class="settings-section">
+          <h2 class="settings-h">Global Hotkey</h2>
+          <p class="settings-desc">
+            Press this combination from anywhere to summon a new incognito
+            chat.
+          </p>
+          <div class="hotkey-row">
+            <button
+              id="hotkey-display"
+              type="button"
+              class="hotkey-pill"
+              aria-label="Current hotkey, click to change"
+            >
+              <span id="hotkey-text">⌘⇧C</span>
+            </button>
+            <button id="hotkey-record" type="button" class="ghost-btn">
+              Record new
+            </button>
+          </div>
+          <p id="hotkey-hint" class="settings-hint"></p>
+        </section>
+
+        <section class="settings-section">
+          <h2 class="settings-h">Default Model</h2>
+          <p class="settings-desc">Used for newly opened chat windows.</p>
+          <div class="seg-control wrap" id="model-seg" role="radiogroup">
+            <button data-value="claude-haiku-4-5" role="radio">Haiku 4.5</button>
+            <button data-value="claude-sonnet-4-5" role="radio">Sonnet 4.5</button>
+            <button data-value="claude-sonnet-4-6" role="radio">Sonnet 4.6</button>
+            <button data-value="claude-opus-4-6" role="radio">Opus 4.6</button>
+            <button data-value="claude-opus-4-7" role="radio">Opus 4.7</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h2 class="settings-h">Default Effort</h2>
+          <p class="settings-desc">
+            Medium and above enable extended thinking. Costs more tokens.
+          </p>
+          <div class="seg-control" id="effort-seg" role="radiogroup">
+            <button data-value="low" role="radio">Low</button>
+            <button data-value="medium" role="radio">Medium</button>
+            <button data-value="high" role="radio">High</button>
+            <button data-value="max" role="radio">Max</button>
+          </div>
+        </section>
+      </div>
+
+      <footer id="settings-footer">
+        <span id="save-status" class="save-status"></span>
+        <button id="save-btn" type="button" class="primary-btn">Save</button>
+      </footer>
+    </main>
+  </body>
+</html>

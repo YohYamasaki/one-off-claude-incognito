@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude (Incognito)</title>
+    <link
+      rel="stylesheet"
+      href="hljs-dark.css"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link
+      rel="stylesheet"
+      href="hljs-light.css"
+      media="(prefers-color-scheme: light)"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="marked.min.js"></script>
+    <script src="highlight.min.js"></script>
+    <script type="module" src="chat.js" defer></script>
+  </head>
+  <body>
+    <main id="app">
+      <header id="titlebar" data-tauri-drag-region>
+        <span id="titlebar-label" data-tauri-drag-region>Claude · incognito</span>
+        <button
+          id="close-btn"
+          type="button"
+          aria-label="Close window"
+          title="Close (Esc)"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path
+              d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </header>
+
+      <div
+        id="messages"
+        role="log"
+        aria-live="polite"
+        data-tauri-drag-region
+      ></div>
+
+      <form id="composer" autocomplete="off">
+        <div class="composer-toolbar">
+          <button
+            type="button"
+            id="model-chip"
+            class="model-chip"
+            aria-haspopup="menu"
+            aria-expanded="false"
+          >
+            <span id="model-chip-model">Sonnet</span>
+            <span class="model-chip-dot">·</span>
+            <span id="model-chip-effort">default</span>
+            <svg
+              class="chevron"
+              width="9"
+              height="6"
+              viewBox="0 0 9 6"
+              aria-hidden="true"
+            >
+              <path
+                d="M1 1 L4.5 4.5 L8 1"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+
+        <div class="composer-input-row">
+          <textarea
+            id="input"
+            placeholder="Message Claude — ↩ to send, ⇧↩ for newline"
+            rows="1"
+            autofocus
+          ></textarea>
+          <button type="submit" id="send-btn" aria-label="Send">
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M8 13 L8 3 M3 8 L8 3 L13 8"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+
+        <div
+          id="model-popover"
+          class="popover"
+          role="menu"
+          aria-hidden="true"
+          hidden
+        >
+          <div class="popover-section">
+            <div class="popover-title">Model</div>
+            <div class="popover-options" id="popover-models">
+              <button type="button" data-value="claude-haiku-4-5">
+                <span class="opt-name">Haiku 4.5</span>
+                <span class="opt-desc">Fastest, lowest cost</span>
+              </button>
+              <button type="button" data-value="claude-sonnet-4-5">
+                <span class="opt-name">Sonnet 4.5</span>
+              </button>
+              <button type="button" data-value="claude-sonnet-4-6">
+                <span class="opt-name">Sonnet 4.6</span>
+                <span class="opt-desc">Balanced (default)</span>
+              </button>
+              <button type="button" data-value="claude-opus-4-6">
+                <span class="opt-name">Opus 4.6</span>
+              </button>
+              <button type="button" data-value="claude-opus-4-7">
+                <span class="opt-name">Opus 4.7</span>
+                <span class="opt-desc">Most capable</span>
+              </button>
+            </div>
+          </div>
+          <div class="popover-section">
+            <div class="popover-title">Effort</div>
+            <div class="popover-options" id="popover-efforts">
+              <button type="button" data-value="low">
+                <span class="opt-name">Low</span>
+              </button>
+              <button type="button" data-value="medium">
+                <span class="opt-name">Medium</span>
+                <span class="opt-desc">Extended thinking</span>
+              </button>
+              <button type="button" data-value="high">
+                <span class="opt-name">High</span>
+                <span class="opt-desc">Extended thinking</span>
+              </button>
+              <button type="button" data-value="max">
+                <span class="opt-name">Max</span>
+                <span class="opt-desc">Extended thinking</span>
+              </button>
+            </div>
+          </div>
+          <div class="popover-footer" id="popover-footer">
+            <span id="popover-status" class="popover-status"></span>
+          </div>
+        </div>
+      </form>
+
+      <div id="confirm-modal" class="modal-backdrop" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+          <h3 class="modal-title" id="modal-title">Switch model?</h3>
+          <p class="modal-body" id="modal-body"></p>
+          <div class="modal-actions">
+            <button type="button" id="modal-cancel" class="ghost-btn">Cancel</button>
+            <button type="button" id="modal-confirm" class="primary-btn">Switch &amp; Clear</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>
