@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for all spawned chat and settings windows",
+  "description": "Capabilities for all spawned chat and settings windows. core:event:deny-emit and deny-emit-to override the allow-emit baked into core:default — the frontend never calls emit, and disabling it removes the cross-window event-injection vector a future XSS would otherwise have.",
   "windows": ["chat-*", "settings"],
   "permissions": [
     "core:default",
-    "core:event:default",
+    "core:event:deny-emit",
+    "core:event:deny-emit-to",
     "core:window:default",
     "core:window:allow-close",
     "core:window:allow-start-dragging",

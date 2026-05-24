@@ -5,11 +5,13 @@ import {
   LogicalPosition,
   LogicalSize,
 } from "@tauri-apps/api/window";
+import DOMPurify from "dompurify";
 
 import { DEFAULT_MODEL, canonicalizeModel, modelShort } from "./lib/models";
 import { EFFORT_LABELS, canonicalizeEffort } from "./lib/effort";
 import { parseClaudeEvent } from "./lib/events";
 import { createImeTracker } from "./lib/ime";
+import { renderMarkdown as renderMarkdownImpl } from "./lib/markdown";
 
 // External browser libraries loaded via <script> tags from `public/`.
 declare global {
@@ -44,7 +46,6 @@ interface SessionInfo {
 }
 
 const currentWindow = getCurrentWindow();
-const WINDOW_LABEL = currentWindow.label;
 
 // ───────── module state ─────────
 
@@ -93,15 +94,13 @@ if (window.hljs && typeof window.hljs.configure === "function") {
   });
 }
 
+// Claude's reply is untrusted input — see src/lib/markdown.ts for why the
+// sanitization step here is the trust boundary for the whole app.
 function renderMarkdown(text: string): string {
-  if (!text) return "";
-  if (window.marked) {
-    return window.marked.parse(text, { breaks: true, gfm: true });
-  }
-  const escaped = text.replace(/[&<>"']/g, (ch) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[ch] || ch,
-  );
-  return `<pre>${escaped}</pre>`;
+  return renderMarkdownImpl(text, {
+    marked: window.marked,
+    sanitizer: DOMPurify,
+  });
 }
 
 function processCodeBlocks(container: HTMLElement): void {
@@ -404,6 +403,30 @@ inputEl.addEventListener("keydown", (e) => {
 
 closeBtnEl.addEventListener("click", () => void currentWindow.close());
 
+// ───────── external link handling ─────────
+//
+// A markdown link in a Claude reply that the user clicks would, by
+// default, navigate this WebView away from the chat UI — annoying
+// even with benign links, and a quiet data-exfil channel if the link
+// destination is attacker-chosen. Catch every anchor click and hand
+// the URL to a Rust command that opens it in the user's default
+// browser instead. The scheme allowlist sits on the Rust side
+// (open_external_url) so a sanitizer bypass can't talk it into
+// launching arbitrary URI handlers.
+document.addEventListener("click", (e) => {
+  const target = e.target as Element | null;
+  if (!target || typeof target.closest !== "function") return;
+  const a = target.closest("a[href]") as HTMLAnchorElement | null;
+  if (!a) return;
+  const href = a.getAttribute("href") || "";
+  // Intra-doc fragments scroll normally — never reach Rust.
+  if (!href || href.startsWith("#")) return;
+  e.preventDefault();
+  void invoke("open_external_url", { url: href }).catch(() => {
+    /* swallow — the important effect (no in-WebView navigation) already happened */
+  });
+});
+
 // ───────── model/effort chip ─────────
 
 function renderChip(): void {
@@ -572,8 +595,17 @@ popoverEffortsEl.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => 
 });
 
 // ───────── claude event handling ─────────
+//
+// Event names are unsuffixed because Rust now emits them via
+// `WebviewWindow::emit`, which dispatches only to this specific
+// window's listeners. Previously they were broadcast as
+// `claude-event-{label}` so each window could filter for its own
+// name — but that left open a cross-window spy: an XSS in window A
+// could `listen("claude-event-{B_label}", …)` and silently mirror
+// window B's conversation. With per-window emit, listeners in other
+// webviews never see the payload.
 
-void listen<string>(`claude-event-${WINDOW_LABEL}`, (e) => {
+void listen<string>("claude-event", (e) => {
   let payload: unknown;
   try {
     payload = JSON.parse(e.payload);
@@ -629,12 +661,12 @@ void listen<string>(`claude-event-${WINDOW_LABEL}`, (e) => {
   }
 });
 
-void listen(`claude-end-${WINDOW_LABEL}`, () => {
+void listen("claude-end", () => {
   if (currentBubble) finalizeBubble(currentBubble);
   setStreaming(false);
 });
 
-void listen<string>(`session-error-${WINDOW_LABEL}`, (e) => {
+void listen<string>("session-error", (e) => {
   const div = document.createElement("div");
   div.className = "bubble error";
   div.textContent =

@@ -3,7 +3,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tempfile::TempDir;
 
 const INCOGNITO_SYSTEM_PROMPT: &str = "You are a friendly, helpful chat assistant in an ephemeral incognito chat window. Nothing in this conversation is saved or remembered after the window closes.\n\nStrict rules:\n- Do NOT use any tools, even if you see references to them in your instructions.\n- Do NOT write or save any files. Do NOT save anything to memory.\n- Do NOT output XML tool-call syntax such as <function_calls>, <invoke>, or <parameter>. Never wrap your response in such tags.\n- Respond ONLY in natural conversational text or Markdown. Be direct and useful.";
@@ -60,6 +60,14 @@ impl ChatSession {
         model: &str,
         effort: &str,
     ) -> std::io::Result<Self> {
+        // Last line of defense against CLI-flag injection: every
+        // caller is supposed to canonicalize first, but a future
+        // refactor could forget and ship a `claude --model
+        // --allowedTools Bash` bug into production. Run canonicalize
+        // here too — it's idempotent on already-safe inputs.
+        let model = crate::settings::canonicalize_model(model);
+        let effort = crate::settings::canonicalize_effort(effort);
+
         let tempdir = tempfile::Builder::new()
             .prefix("one-off-claude-incognito-")
             .tempdir()?;
@@ -76,13 +84,13 @@ impl ChatSession {
             "--tools".into(),
             "".into(),
             "--model".into(),
-            model.to_string(),
+            model.clone(),
             "--append-system-prompt".into(),
             INCOGNITO_SYSTEM_PROMPT.into(),
         ];
         if !effort.is_empty() && effort != "default" {
             args.push("--effort".into());
-            args.push(effort.to_string());
+            args.push(effort.clone());
         }
 
         let mut child = Command::new(claude_path())
@@ -111,23 +119,34 @@ impl ChatSession {
             });
         }
 
+        // Emit per-target instead of broadcasting. `app.emit("claude-
+        // event-{label}", …)` would physically dispatch to every
+        // listener in every window — fine when only the matching
+        // window subscribed, but a future XSS in window A could
+        // `listen("claude-event-{B_label}", …)` and quietly mirror
+        // window B's entire conversation. `WebviewWindow::emit` is
+        // filtered at the manager layer: listeners in other webviews
+        // never see the payload at all.
         let app_for_thread = app.clone();
-        let event_name = format!("claude-event-{}", window_label);
-        let end_event_name = format!("claude-end-{}", window_label);
+        let label_for_thread = window_label.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().flatten() {
-                let _ = app_for_thread.emit(&event_name, line);
+                if let Some(win) = app_for_thread.get_webview_window(&label_for_thread) {
+                    let _ = win.emit("claude-event", line);
+                }
             }
-            let _ = app_for_thread.emit(&end_event_name, ());
+            if let Some(win) = app_for_thread.get_webview_window(&label_for_thread) {
+                let _ = win.emit("claude-end", ());
+            }
         });
 
         Ok(Self {
             child,
             stdin,
             tempdir,
-            model: model.to_string(),
-            effort: effort.to_string(),
+            model,
+            effort,
         })
     }
 
@@ -150,17 +169,16 @@ impl Drop for ChatSession {
         let _ = self.child.kill();
         let _ = self.child.wait();
 
+        // Fast path for the normal-close case. The startup sweep in
+        // crate::cleanup picks up anything this misses (crash, hard
+        // kill, encoded-path mismatch with what claude actually wrote).
         if let Some(home) = dirs::home_dir() {
             if let Ok(canonical) = self.tempdir.path().canonicalize() {
-                if let Some(encoded) = encode_path(&canonical) {
+                if let Some(encoded) = crate::cleanup::encode_path(&canonical) {
                     let project_dir = home.join(".claude").join("projects").join(encoded);
                     let _ = std::fs::remove_dir_all(&project_dir);
                 }
             }
         }
     }
-}
-
-fn encode_path(path: &std::path::Path) -> Option<String> {
-    path.to_str().map(|s| s.replace('/', "-"))
 }

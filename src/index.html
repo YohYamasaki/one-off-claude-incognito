@@ -2,6 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Belt to the tauri.conf.json `csp` field's suspenders. Tauri only
+      injects its CSP into responses served via the asset protocol —
+      in `npm run tauri dev` the page is served by Vite, which means
+      the response carries no CSP header. This meta tag enforces the
+      same policy in dev so sanitizer bypasses (or future regressions)
+      can't quietly exfiltrate via a remote <img> or external fetch.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self' ws://localhost:1420 ws://127.0.0.1:1420; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>One-off Claude</title>
     <link

