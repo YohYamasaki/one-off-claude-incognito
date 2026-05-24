@@ -91,6 +91,15 @@ impl ChatSession {
             // anything dangerous if the user clicks them.
             "--tools".into(),
             "WebSearch,WebFetch".into(),
+            // `--tools` makes them AVAILABLE; `--allowed-tools`
+            // auto-approves them so claude doesn't try to surface a
+            // permission dialog (we're in --print mode and would
+            // deadlock waiting for stdin). Without this, claude
+            // replies as if the tools weren't granted — telling the
+            // user "if you give me WebSearch/WebFetch permission I
+            // could look that up", which defeats the point.
+            "--allowed-tools".into(),
+            "WebSearch WebFetch".into(),
             "--model".into(),
             model.clone(),
             "--append-system-prompt".into(),
