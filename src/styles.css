@@ -219,33 +219,6 @@ body {
   max-width: 78%;
 }
 
-/* streaming caret on the text section, not the whole bubble */
-.bubble.assistant.streaming .bubble-text:empty::after,
-.bubble.assistant.streaming .bubble-text::after {
-  content: "";
-}
-.bubble.assistant.streaming .bubble-text {
-  position: relative;
-}
-.bubble.assistant.streaming .bubble-text::after {
-  content: "▍";
-  display: inline-block;
-  color: var(--fg-muted);
-  animation: caret 1s steps(2) infinite;
-  margin-left: 2px;
-  font-weight: 100;
-  vertical-align: -1px;
-}
-.bubble.assistant.streaming.thinking-only .bubble-text::after {
-  display: none;
-}
-
-@keyframes caret {
-  to {
-    opacity: 0;
-  }
-}
-
 .bubble.error {
   align-self: stretch;
   max-width: 100%;

@@ -617,7 +617,10 @@ fn spawn_chat_window(app: &tauri::AppHandle) {
     .inner_size(win_w, win_h)
     .min_inner_size(420.0, 200.0)
     .position(init_x, init_y)
-    .always_on_top(true)
+    // Default stacking — chat windows sink behind whatever the user
+    // is focused on. Previously pinned with `always_on_top(true)`,
+    // but that traps the chat above unrelated work; macOS users
+    // expect the foreground app's window to actually be in front.
     .decorations(false)
     .transparent(true)
     .shadow(true)

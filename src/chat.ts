@@ -230,9 +230,11 @@ function scheduleRender(): void {
       processCodeBlocks(b.text);
     }
     scrollToBottom();
-    // We intentionally don't resize the window on every streaming delta —
-    // only on bubble count changes (see addUserBubble / appendAssistantBubble
-    // / finalizeBubble).
+    // Grow the window mid-stream too. The 60ms debounce + 6px change
+    // threshold + tween-active lock in syncWindowHeight collapse the
+    // rapid-fire delta calls into a few smooth resizes instead of
+    // resizing on every token.
+    debouncedSyncHeight();
   });
 }
 
