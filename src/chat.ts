@@ -12,6 +12,7 @@ import { EFFORT_LABELS, canonicalizeEffort } from "./lib/effort";
 import { parseClaudeEvent } from "./lib/events";
 import { createImeTracker } from "./lib/ime";
 import { renderMarkdown as renderMarkdownImpl } from "./lib/markdown";
+import { makeListenTarget } from "./lib/listen-target";
 
 // External browser libraries loaded via <script> tags from `public/`.
 declare global {
@@ -598,14 +599,18 @@ popoverEffortsEl.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => 
 
 // ───────── claude event handling ─────────
 //
-// Event names are unsuffixed because Rust now emits them via
-// `WebviewWindow::emit`, which dispatches only to this specific
-// window's listeners. Previously they were broadcast as
-// `claude-event-{label}` so each window could filter for its own
-// name — but that left open a cross-window spy: an XSS in window A
-// could `listen("claude-event-{B_label}", …)` and silently mirror
-// window B's conversation. With per-window emit, listeners in other
-// webviews never see the payload.
+// Each chat window listens with a target pinned to its own webview
+// label. Rust pairs this with `app.emit_to(label, …)` (see chat.rs).
+//
+// Why both halves matter: `WebviewWindow::emit` from Rust is
+// actually a broadcast (uses the default Emitter trait impl), and a
+// `listen()` call from JS without an explicit target registers as
+// `EventTarget::Any` — which `emit_to` doesn't reach. Either half
+// alone leaks: broadcast + Any listeners means every window
+// receives every window's deltas (the "responses mixing between
+// chats" bug). Filtered emit + targeted listener gets each delta to
+// exactly the right window.
+const listenTarget = makeListenTarget(currentWindow.label);
 
 void listen<string>("claude-event", (e) => {
   let payload: unknown;
@@ -661,12 +666,12 @@ void listen<string>("claude-event", (e) => {
       }
       return;
   }
-});
+}, listenTarget);
 
 void listen("claude-end", () => {
   if (currentBubble) finalizeBubble(currentBubble);
   setStreaming(false);
-});
+}, listenTarget);
 
 void listen<string>("session-error", (e) => {
   const div = document.createElement("div");
@@ -678,7 +683,7 @@ void listen<string>("session-error", (e) => {
   messagesEl.appendChild(div);
   scrollToBottom();
   setStreaming(false);
-});
+}, listenTarget);
 
 // ───────── boot ─────────
 

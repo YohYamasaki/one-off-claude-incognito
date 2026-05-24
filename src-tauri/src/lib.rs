@@ -671,12 +671,13 @@ fn spawn_chat_window(app: &tauri::AppHandle) {
             let err_msg = e.to_string();
             let app_clone = app.clone();
             let label_for_event = label.clone();
-            // Per-window emit — same anti-spy reasoning as in chat.rs.
+            // emit_to(label, …) instead of webview.emit — same
+            // reasoning as in chat.rs: webview.emit is a broadcast,
+            // emit_to is filtered. See the comment there for the full
+            // story.
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(400));
-                if let Some(win) = app_clone.get_webview_window(&label_for_event) {
-                    let _ = win.emit("session-error", err_msg);
-                }
+                let _ = app_clone.emit_to(label_for_event.as_str(), "session-error", err_msg);
             });
             return;
         }

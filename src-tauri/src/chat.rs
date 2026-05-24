@@ -3,10 +3,10 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tempfile::TempDir;
 
-const INCOGNITO_SYSTEM_PROMPT: &str = "You are a friendly, helpful chat assistant in an ephemeral incognito chat window. Nothing in this conversation is saved or remembered after the window closes.\n\nStrict rules:\n- Do NOT use any tools, even if you see references to them in your instructions.\n- Do NOT write or save any files. Do NOT save anything to memory.\n- Do NOT output XML tool-call syntax such as <function_calls>, <invoke>, or <parameter>. Never wrap your response in such tags.\n- Respond ONLY in natural conversational text or Markdown. Be direct and useful.";
+const INCOGNITO_SYSTEM_PROMPT: &str = "You are a friendly, helpful chat assistant in an ephemeral incognito chat window. Nothing in this conversation is saved or remembered after the window closes.\n\nGuidelines:\n- The only tools available in this session are WebSearch and WebFetch — use them freely when looking something up would help. No file-system, shell, or memory tools are available; don't attempt them.\n- Linking to and quoting URLs in your reply is fine and encouraged. Markdown links render normally.\n- Do NOT output XML tool-call syntax such as <function_calls>, <invoke>, or <parameter>. Never wrap your response in such tags.\n- Respond in natural conversational text or Markdown. Be direct and useful.";
 
 /// Locate the `claude` binary. GUI apps on macOS don't inherit the shell PATH,
 /// so we have to look in common install locations and fall back to asking a
@@ -81,8 +81,16 @@ impl ChatSession {
             "stream-json".into(),
             "--include-partial-messages".into(),
             "--no-session-persistence".into(),
+            // Web-only tool surface: WebSearch + WebFetch are useful
+            // for "look this up" chats, while Bash / Read / Write /
+            // Edit / Glob / Grep all touch the user's filesystem (or
+            // worse, shell) and have no business in an ephemeral chat
+            // window. The Rust-side scheme allowlist on
+            // open_external_url, plus the WebView's CSP and link-click
+            // interceptor, keep network-derived URLs from doing
+            // anything dangerous if the user clicks them.
             "--tools".into(),
-            "".into(),
+            "WebSearch,WebFetch".into(),
             "--model".into(),
             model.clone(),
             "--append-system-prompt".into(),
@@ -119,26 +127,29 @@ impl ChatSession {
             });
         }
 
-        // Emit per-target instead of broadcasting. `app.emit("claude-
-        // event-{label}", …)` would physically dispatch to every
-        // listener in every window — fine when only the matching
-        // window subscribed, but a future XSS in window A could
-        // `listen("claude-event-{B_label}", …)` and quietly mirror
-        // window B's entire conversation. `WebviewWindow::emit` is
-        // filtered at the manager layer: listeners in other webviews
-        // never see the payload at all.
+        // Route claude output to this session's window only.
+        //
+        // Subtle Tauri behaviour: `WebviewWindow::emit` is the default
+        // Emitter trait method that internally calls `manager.emit`,
+        // which BROADCASTS to every webview — it doesn't filter by
+        // the receiver's label. Using it here caused window A's
+        // claude reply to also fire window B's listener for the same
+        // event name, mixing conversations across panes.
+        //
+        // `emit_to(label, …)` builds an EventTarget::AnyLabel and the
+        // manager runs `filter_target` against each listener, only
+        // matching ones whose target carries the same label. Combined
+        // with the frontend registering its listener with target
+        // `{kind:'WebviewWindow', label}` (see chat.ts), each window
+        // receives its own deltas and nothing else.
         let app_for_thread = app.clone();
         let label_for_thread = window_label.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().flatten() {
-                if let Some(win) = app_for_thread.get_webview_window(&label_for_thread) {
-                    let _ = win.emit("claude-event", line);
-                }
+                let _ = app_for_thread.emit_to(label_for_thread.as_str(), "claude-event", line);
             }
-            if let Some(win) = app_for_thread.get_webview_window(&label_for_thread) {
-                let _ = win.emit("claude-end", ());
-            }
+            let _ = app_for_thread.emit_to(label_for_thread.as_str(), "claude-end", ());
         });
 
         Ok(Self {
